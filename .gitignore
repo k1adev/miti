@@ -82,4 +82,11 @@ prod/
 
 # Arquivos de desenvolvimento
 development/
-dev/ 
+dev/
+
+# Screenshots (permitir imagens para documentação)
+!screenshots/*.png
+!screenshots/*.jpg
+!screenshots/*.jpeg
+!screenshots/*.gif
+!screenshots/*.webp 

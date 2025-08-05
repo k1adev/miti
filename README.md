@@ -1,10 +1,10 @@
-# Miti - Sistema de Gestão Ecommerce
+# Miti - Sistema de Gestão Empresarial
 
 Uma aplicação web completa para gestão empresarial com interface moderna, banco de dados SQLite, sistema de estoque avançado com SKUs compostos, integração com API do Bling e suporte a APIs externas.
 
 ## 🚀 Demo Online
 
-**Acesse a demonstração:** [Demo Apoli](https://apoli-demo.vercel.app)
+**Acesse a demonstração:** [Demo Miti](https://miti-demo.vercel.app)
 
 > ⚠️ **Nota:** Este é um repositório privado para proteção intelectual. Para acesso ao código fonte ou colaboração, entre em contato.
 
