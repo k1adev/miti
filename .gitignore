@@ -1,0 +1,85 @@
+# Dependências
+node_modules/
+*/node_modules/
+
+# Arquivos de build
+client/build/
+dist/
+build/
+
+# Banco de dados
+*.sqlite
+*.sqlite3
+database.sqlite
+database_backup_*.sqlite
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+server/bling_api.log
+
+# Variáveis de ambiente
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env_backup
+
+# Arquivos do sistema
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Arquivos temporários
+*.tmp
+*.temp
+temp/
+tmp/
+
+# Arquivos de backup
+*.bak
+*.backup
+backup/
+
+# Arquivos de upload
+uploads/
+public/uploads/
+
+# Tokens e configurações sensíveis
+server/bling_token.json
+*.key
+*.pem
+
+# Arquivos de cache
+.cache/
+cache/
+
+# Arquivos de relatório
+reports/
+*.csv
+*.xlsx
+*.xls
+
+# Arquivos de teste
+coverage/
+.nyc_output/
+test-results/
+
+# Arquivos de produção
+production/
+prod/
+
+# Arquivos de desenvolvimento
+development/
+dev/ 

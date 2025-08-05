@@ -1,0 +1,87 @@
+{
+  "name": "apoli-sistema-gestao",
+  "version": "2.0.0",
+  "description": "Sistema de Gestão Completo com Controle de Estoque, SKUs Compostos e APIs Externas",
+  "main": "main.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "concurrently \"nodemon server/index.js\" \"cd client && npm start\"",
+    "build": "cd client && npm run build",
+    "install-all": "npm install && cd client && npm install",
+    "electron": "electron .",
+    "package": "npm run build && electron-builder",
+    "package-win": "npm run build && electron-builder --win",
+    "clean": "rimraf dist node_modules client/node_modules client/build",
+    "test": "echo \"No tests specified\" && exit 0"
+  },
+  "keywords": [
+    "gestao",
+    "estoque",
+    "sku",
+    "composite",
+    "api",
+    "electron",
+    "desktop"
+  ],
+  "author": "Apoli Team",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.6.0",
+    "bcryptjs": "^3.0.2",
+    "cors": "^2.8.5",
+    "csv-parser": "^3.0.0",
+    "csv-writer": "^1.6.0",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "helmet": "^8.1.0",
+    "html2canvas": "^1.4.1",
+    "jsonwebtoken": "^9.0.2",
+    "jspdf": "^3.0.1",
+    "morgan": "^1.10.0",
+    "multer": "^1.4.5-lts.1",
+    "sqlite3": "^5.1.6"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "electron": "^27.0.0",
+    "electron-builder": "^24.6.4",
+    "electron-is-dev": "^2.0.0",
+    "nodemon": "^3.0.1",
+    "rimraf": "^5.0.5"
+  },
+  "build": {
+    "appId": "com.apoli.sistemagestao",
+    "productName": "Apoli - Sistema de Gestão",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "server/**/*",
+      "client/build/**/*",
+      "node_modules/**/*",
+      "main.js",
+      "package.json",
+      ".env.example"
+    ],
+    "extraResources": [
+      {
+        "from": "server",
+        "to": "server"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  },
+  "engines": {
+    "node": ">=16.0.0",
+    "npm": ">=8.0.0"
+  }
+}
