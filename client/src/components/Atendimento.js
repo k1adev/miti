@@ -170,45 +170,44 @@ const QuickRepliesPanel = ({ onInsert, disabled }) => {
   };
 
   return (
-    <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden flex flex-col w-56 flex-shrink-0">
-      <div className="px-3 py-2 border-b border-gray-100 bg-gray-50/50">
-        <h3 className="text-xs font-semibold text-gray-700 flex items-center gap-1.5">
-          <Copy size={12} /> Respostas rápidas
+    <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden flex flex-col w-[min(100%,20rem)] min-w-[17rem] flex-shrink-0 self-stretch max-h-full min-h-0">
+      <div className="px-3 py-2.5 border-b border-gray-100 bg-gray-50/50">
+        <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
+          <Copy size={14} className="text-blue-500/80" /> Respostas rápidas
         </h3>
-        <p className="text-[10px] text-gray-500 mt-0.5">Título = atalho visível; texto = inserido ao clicar.</p>
       </div>
-      <div className="flex-1 overflow-y-auto p-2 min-h-0">
+      <div className="flex-1 overflow-y-auto p-2.5 min-h-0">
         {loading ? (
-          <div className="py-4 text-center text-xs text-gray-400">Carregando...</div>
+          <div className="py-6 text-center text-sm text-gray-400">Carregando...</div>
         ) : (
-          <div className="space-y-1">
+          <div className="space-y-2">
             {replies.map((item, i) => (
-              <div key={i} className="group flex items-start gap-1">
+              <div key={i} className="group flex items-start gap-1.5">
                 <button type="button" onClick={() => handleUse(item.text)} disabled={disabled}
-                  className="flex-1 text-left bg-gray-50 hover:bg-blue-50 border border-gray-100 hover:border-blue-200 rounded-lg px-2 py-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="flex-1 text-left bg-gray-50 hover:bg-blue-50 border border-gray-100 hover:border-blue-200 rounded-xl px-3 py-2.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed min-h-[3.25rem]"
                   title={item.text}>
-                  <span className="block text-[11px] font-semibold text-gray-800 truncate">{item.title}</span>
-                  <span className="block text-[10px] text-gray-500 truncate mt-0.5">{item.text.length > 50 ? item.text.slice(0, 50) + '…' : item.text}</span>
+                  <span className="block text-sm font-semibold text-gray-900 line-clamp-2 leading-snug">{item.title}</span>
+                  <span className="block text-xs text-gray-600 line-clamp-2 mt-1 leading-snug">{item.text.length > 72 ? item.text.slice(0, 72) + '…' : item.text}</span>
                 </button>
-                <button type="button" onClick={() => handleRemove(i)} className="p-1 text-gray-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" title="Remover">
-                  <Trash2 size={10} />
+                <button type="button" onClick={() => handleRemove(i)} className="p-1.5 text-gray-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 self-start" title="Remover">
+                  <Trash2 size={14} />
                 </button>
               </div>
             ))}
           </div>
         )}
       </div>
-      <div className="p-2 border-t border-gray-100 space-y-1.5">
+      <div className="p-2.5 border-t border-gray-100 space-y-2 bg-gray-50/30">
         <input type="text" value={newTitle} onChange={e => setNewTitle(e.target.value)}
           placeholder="Título do atalho"
-          className="w-full text-[11px] border border-gray-200 rounded-lg px-2 py-1.5 focus:ring-1 focus:ring-blue-400 focus:border-blue-300" />
-        <div className="flex gap-1">
+          className="w-full text-[13px] border border-gray-200 rounded-lg px-2.5 py-2 focus:ring-1 focus:ring-blue-400 focus:border-blue-300" />
+        <div className="flex gap-1.5">
           <input type="text" value={newText} onChange={e => setNewText(e.target.value)}
             placeholder="Texto da resposta..."
             onKeyDown={e => { if (e.key === 'Enter' && e.ctrlKey) { e.preventDefault(); handleAdd(); } }}
-            className="flex-1 text-[11px] border border-gray-200 rounded-lg px-2 py-1.5 focus:ring-1 focus:ring-blue-400 focus:border-blue-300" />
-          <button type="button" onClick={handleAdd} disabled={!newText.trim() || !newTitle.trim() || saving} className="p-1.5 bg-blue-500/80 hover:bg-blue-600 text-white rounded-lg disabled:opacity-40" title="Adicionar">
-            <Plus size={14} />
+            className="flex-1 text-[13px] border border-gray-200 rounded-lg px-2.5 py-2 focus:ring-1 focus:ring-blue-400 focus:border-blue-300" />
+          <button type="button" onClick={handleAdd} disabled={!newText.trim() || !newTitle.trim() || saving} className="p-2 bg-blue-500/80 hover:bg-blue-600 text-white rounded-lg disabled:opacity-40" title="Adicionar">
+            <Plus size={16} />
           </button>
         </div>
       </div>
@@ -421,39 +420,38 @@ const AutocompleteTextarea = ({ value, onChange, onSend, placeholder, disabled, 
 };
 
 const QuestionMiniCard = ({ question, selected, onClick }) => {
-  const st = STATUS_CONFIG[question.status] || STATUS_CONFIG.UNANSWERED;
   return (
     <button onClick={onClick}
-      className={`w-full text-left flex items-center gap-2.5 p-2.5 rounded-lg border transition-all ${
-        selected ? 'border-blue-400 bg-blue-50 shadow-sm' : 'border-transparent hover:bg-gray-50'
+      className={`w-full text-left flex items-start gap-3.5 p-3.5 rounded-xl border transition-all ${
+        selected ? 'border-blue-400 bg-blue-50 shadow-sm ring-1 ring-blue-100' : 'border-transparent hover:bg-gray-50'
       }`}>
       {question._item?.thumbnail ? (
-        <img src={httpsAssetUrl(question._item.thumbnail)} alt="" className="w-9 h-9 rounded object-cover flex-shrink-0 border border-gray-200" />
+        <img src={httpsAssetUrl(question._item.thumbnail)} alt="" className="w-14 h-14 rounded-lg object-cover flex-shrink-0 border border-gray-200 shadow-sm" />
       ) : (
-        <div className="w-9 h-9 rounded bg-gray-100 flex items-center justify-center flex-shrink-0"><MessageSquare size={14} className="text-gray-400" /></div>
+        <div className="w-14 h-14 rounded-lg bg-gray-100 flex items-center justify-center flex-shrink-0"><MessageSquare size={22} className="text-gray-400" /></div>
       )}
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-1.5">
-          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${question.status === 'UNANSWERED' ? 'bg-amber-400/80' : 'bg-emerald-400/80'}`} />
+      <div className="flex-1 min-w-0 py-0.5">
+        <div className="flex items-start gap-2">
+          <span className={`w-2 h-2 rounded-full flex-shrink-0 mt-1.5 ${question.status === 'UNANSWERED' ? 'bg-amber-400' : 'bg-emerald-500'}`} />
           {question._item?.permalink ? (
             <span
               role="link"
               onClick={(e) => { e.stopPropagation(); window.open(question._item.permalink, '_blank', 'noopener,noreferrer'); }}
-              className="text-xs font-medium text-blue-700 hover:underline truncate text-left cursor-pointer"
+              className="text-sm font-semibold text-blue-700 hover:underline line-clamp-2 text-left cursor-pointer leading-snug"
             >{question._item?.title || question.item_id}</span>
           ) : (
-            <p className="text-xs font-medium text-gray-700 truncate">{question._item?.title || question.item_id}</p>
+            <p className="text-sm font-semibold text-gray-800 line-clamp-2 leading-snug">{question._item?.title || question.item_id}</p>
           )}
         </div>
         {question._buyerNickname && (
-          <p className="text-[10px] text-gray-500 truncate">Comprador: {question._buyerNickname}</p>
+          <p className="text-xs text-gray-600 truncate mt-1.5 font-medium">Comprador: {question._buyerNickname}</p>
         )}
-        <p className="text-[11px] text-gray-500 truncate mt-0.5">{question.text}</p>
+        <p className="text-sm text-gray-600 line-clamp-2 mt-1.5 leading-snug">{question.text}</p>
       </div>
-      <div className="flex flex-col items-end gap-1 flex-shrink-0">
-        <span className="text-[10px] text-gray-400">{timeAgo(question.date_created)}</span>
+      <div className="flex flex-col items-end gap-1.5 flex-shrink-0 pt-0.5">
+        <span className="text-xs font-medium text-gray-500 tabular-nums">{timeAgo(question.date_created)}</span>
         {question._marketplace && (
-          <img src={MARKETPLACE_LOGOS[question._marketplace]} alt="" className="w-3.5 h-3.5 object-contain opacity-60" />
+          <img src={MARKETPLACE_LOGOS[question._marketplace]} alt="" className="w-4 h-4 object-contain opacity-70" />
         )}
       </div>
     </button>
@@ -475,20 +473,20 @@ const QuestionDetail = ({ question, answerText, setAnswerText, onAnswer, onDelet
   };
 
   return (
-    <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden h-full flex flex-col">
-      <div className="p-4 border-b border-gray-100 flex-shrink-0">
-        <div className="flex items-start gap-3">
+    <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden flex-1 min-h-0 flex flex-col">
+      <div className="p-4 sm:p-5 border-b border-gray-100 flex-shrink-0">
+        <div className="flex items-start gap-4">
           {question._item?.thumbnail ? (
-            <img src={httpsAssetUrl(question._item.thumbnail)} alt="" className="w-14 h-14 rounded-lg object-cover flex-shrink-0 border border-gray-200" />
+            <img src={httpsAssetUrl(question._item.thumbnail)} alt="" className="w-16 h-16 sm:w-[4.5rem] sm:h-[4.5rem] rounded-xl object-cover flex-shrink-0 border border-gray-200 shadow-sm" />
           ) : (
-            <div className="w-14 h-14 rounded-lg bg-gray-100 flex items-center justify-center flex-shrink-0"><MessageSquare size={20} className="text-gray-400" /></div>
+            <div className="w-16 h-16 sm:w-[4.5rem] sm:h-[4.5rem] rounded-xl bg-gray-100 flex items-center justify-center flex-shrink-0"><MessageSquare size={22} className="text-gray-400" /></div>
           )}
           <div className="flex-1 min-w-0">
             {question._item?.permalink ? (
               <a href={question._item.permalink} target="_blank" rel="noopener noreferrer"
-                className="text-sm font-semibold text-blue-700 hover:underline line-clamp-2 block">{question._item?.title || `Item: ${question.item_id}`}</a>
+                className="text-base font-semibold text-blue-700 hover:underline line-clamp-3 block leading-snug">{question._item?.title || `Item: ${question.item_id}`}</a>
             ) : (
-              <p className="text-sm font-semibold text-gray-800 line-clamp-2">{question._item?.title || `Item: ${question.item_id}`}</p>
+              <p className="text-base font-semibold text-gray-800 line-clamp-3 leading-snug">{question._item?.title || `Item: ${question.item_id}`}</p>
             )}
             <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
               <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold ${st.color}`}>
@@ -496,7 +494,6 @@ const QuestionDetail = ({ question, answerText, setAnswerText, onAnswer, onDelet
               </span>
               <MarketplaceBadge marketplace={question._marketplace} accountName={question._accountName} />
               {responseTimeBadge(question)}
-              {question._item?.listing_type_id && getListingTypeBadge(question._item.listing_type_id)}
               <span className="text-[10px] text-gray-400">{timeAgo(question.date_created)}</span>
             </div>
             {question._item?.sku && (
@@ -514,37 +511,37 @@ const QuestionDetail = ({ question, answerText, setAnswerText, onAnswer, onDelet
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-4 space-y-3">
-          <div className="bg-gray-50/80 rounded-lg p-3">
-          <div className="flex items-center gap-2 mb-2">
-            <div className="w-6 h-6 rounded-full bg-blue-50 flex items-center justify-center">
-              <MessageSquare size={12} className="text-blue-500/80" />
+      <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-4 min-h-0">
+          <div className="bg-gray-50/90 rounded-xl p-4 border border-gray-100/80">
+          <div className="flex items-center gap-2 mb-3">
+            <div className="w-8 h-8 rounded-full bg-blue-50 flex items-center justify-center">
+              <MessageSquare size={16} className="text-blue-500/80" />
             </div>
-            <span className="text-xs font-semibold text-gray-500">Pergunta do comprador</span>
-            <span className="text-[10px] text-gray-400">{new Date(question.date_created).toLocaleString('pt-BR')}</span>
+            <span className="text-sm font-semibold text-gray-600">Pergunta do comprador</span>
+            <span className="text-xs text-gray-400">{new Date(question.date_created).toLocaleString('pt-BR')}</span>
           </div>
           {question._buyerNickname && (
-            <p className="text-[11px] text-gray-600 mb-1">Comprador: <span className="font-medium">{question._buyerNickname}</span></p>
+            <p className="text-sm text-gray-600 mb-2">Comprador: <span className="font-semibold">{question._buyerNickname}</span></p>
           )}
-          <p className="text-sm text-gray-700 leading-relaxed">{question.text || '(Texto não disponível)'}</p>
+          <p className="text-base text-gray-800 leading-relaxed">{question.text || '(Texto não disponível)'}</p>
         </div>
 
         {question.answer && question.answer.text && (
-          <div className="bg-emerald-50/60 rounded-lg p-3">
-            <div className="flex items-center gap-2 mb-2">
-              <div className="w-6 h-6 rounded-full bg-emerald-100/60 flex items-center justify-center">
-                <CheckCircle size={12} className="text-emerald-500" />
+          <div className="bg-emerald-50/70 rounded-xl p-4 border border-emerald-100/60">
+            <div className="flex items-center gap-2 mb-3 flex-wrap">
+              <div className="w-8 h-8 rounded-full bg-emerald-100/80 flex items-center justify-center">
+                <CheckCircle size={16} className="text-emerald-500" />
               </div>
-              <span className="text-xs font-semibold text-emerald-600">Sua resposta</span>
-              <span className="text-[10px] text-gray-400">{new Date(question.answer.date_created).toLocaleString('pt-BR')}</span>
+              <span className="text-sm font-semibold text-emerald-700">Sua resposta</span>
+              <span className="text-xs text-gray-500">{new Date(question.answer.date_created).toLocaleString('pt-BR')}</span>
               {responseTimeBadge(question)}
             </div>
-            <p className="text-sm text-gray-700 leading-relaxed">{question.answer.text}</p>
+            <p className="text-base text-gray-800 leading-relaxed">{question.answer.text}</p>
           </div>
         )}
       </div>
 
-      <div className="p-4 border-t border-gray-100 flex-shrink-0">
+      <div className="p-4 sm:p-5 border-t border-gray-100 flex-shrink-0 bg-white">
         {question.status === 'UNANSWERED' ? (
           <div>
             <AutocompleteTextarea value={answerText} onChange={setAnswerText} onSend={handleSend}
@@ -795,9 +792,9 @@ export const Atendimento = ({ user }) => {
   const selectedQuestion = questions.find(q => q.id === selectedQuestionId);
 
   return (
-    <div className="h-[calc(100vh-4rem)]">
+    <div className="flex flex-col h-[calc(100vh-4rem)] min-h-0">
       {/* Header */}
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center justify-between mb-3 flex-shrink-0">
         <div className="flex items-center gap-3">
           <h1 className="text-xl font-bold text-gray-800 flex items-center gap-2">
             <MessageSquare className="text-blue-500/80" size={22} />Atendimento
@@ -819,7 +816,7 @@ export const Atendimento = ({ user }) => {
       </div>
 
       {/* Filters */}
-      <div className="flex items-center gap-2 mb-3 flex-wrap">
+      <div className="flex items-center gap-2 mb-3 flex-wrap flex-shrink-0">
         <div className="flex items-center gap-1.5 bg-white border border-gray-200 rounded-lg px-2.5 py-1.5">
           <Filter size={12} className="text-gray-400" />
           <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}
@@ -850,7 +847,7 @@ export const Atendimento = ({ user }) => {
 
       {/* Main Content - 2 columns on large screens */}
       {loading && questions.length === 0 ? (
-        <div className="space-y-2">
+        <div className="space-y-2 flex-1 min-h-0 overflow-auto">
           {[...Array(5)].map((_, i) => (
             <div key={i} className="bg-white rounded-xl border border-gray-200 p-3 animate-pulse">
               <div className="flex items-center gap-2.5">
@@ -861,26 +858,26 @@ export const Atendimento = ({ user }) => {
           ))}
         </div>
       ) : filteredQuestions.length === 0 ? (
-        <div className="text-center py-16 bg-white rounded-xl border border-gray-200">
+        <div className="text-center py-16 bg-white rounded-xl border border-gray-200 flex-1 flex flex-col justify-center min-h-[12rem]">
           <MessageSquare size={40} className="mx-auto text-gray-300 mb-3" />
           <h3 className="text-base font-medium text-gray-500">Nenhuma pergunta encontrada</h3>
           <p className="text-xs text-gray-400 mt-1">{statusFilter ? 'Tente outro filtro' : 'As perguntas dos seus anúncios aparecerão aqui'}</p>
         </div>
       ) : (
-        <div className="flex gap-4 h-[calc(100%-6rem)]">
+        <div className="flex gap-4 flex-1 min-h-0">
           {/* Left column - question list */}
-          <div className="w-full lg:w-[420px] lg:flex-shrink-0 overflow-y-auto space-y-1 pr-1">
+          <div className="w-full lg:w-[min(100%,28rem)] lg:min-w-[22rem] lg:flex-shrink-0 overflow-y-auto space-y-2 pr-1">
             {unansweredQuestions.length > 0 && (
               <div>
                 <button onClick={() => toggleSection('unanswered')}
-                  className="w-full flex items-center gap-1.5 text-[10px] font-semibold text-yellow-700 uppercase tracking-wider px-1 py-1.5 hover:bg-yellow-50 rounded transition-colors">
-                  {collapsedSections.unanswered ? <ChevronDown size={10} /> : <ChevronUp size={10} />}
-                  <Clock size={10} />Aguardando resposta ({unansweredQuestions.length})
+                  className="w-full flex items-center gap-2 text-xs font-bold text-yellow-800 uppercase tracking-wide px-2 py-2 hover:bg-yellow-50 rounded-lg transition-colors">
+                  {collapsedSections.unanswered ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+                  <Clock size={14} />Aguardando resposta ({unansweredQuestions.length})
                 </button>
                 {!collapsedSections.unanswered && (
-                  <div className="space-y-1">
+                  <div className="space-y-2">
                     {/* Desktop: mini cards for split view */}
-                    <div className="hidden lg:block space-y-0.5">
+                    <div className="hidden lg:block space-y-1.5">
                       {unansweredQuestions.map(q => (
                         <QuestionMiniCard key={q.id} question={q} selected={selectedQuestionId === q.id}
                           onClick={() => setSelectedQuestionId(q.id)} />
@@ -900,13 +897,13 @@ export const Atendimento = ({ user }) => {
             {otherQuestions.length > 0 && (
               <div className={unansweredQuestions.length > 0 ? 'mt-3' : ''}>
                 <button onClick={() => toggleSection('others')}
-                  className="w-full flex items-center gap-1.5 text-[10px] font-semibold text-gray-500 uppercase tracking-wider px-1 py-1.5 hover:bg-gray-50 rounded transition-colors">
-                  {collapsedSections.others ? <ChevronDown size={10} /> : <ChevronUp size={10} />}
-                  <CheckCircle size={10} />Outras ({otherQuestions.length})
+                  className="w-full flex items-center gap-2 text-xs font-bold text-gray-600 uppercase tracking-wide px-2 py-2 hover:bg-gray-50 rounded-lg transition-colors">
+                  {collapsedSections.others ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+                  <CheckCircle size={14} />Outras ({otherQuestions.length})
                 </button>
                 {!collapsedSections.others && (
-                  <div className="space-y-1">
-                    <div className="hidden lg:block space-y-0.5">
+                  <div className="space-y-2">
+                    <div className="hidden lg:block space-y-1.5">
                       {otherQuestions.map(q => (
                         <QuestionMiniCard key={q.id} question={q} selected={selectedQuestionId === q.id}
                           onClick={() => setSelectedQuestionId(q.id)} />
@@ -924,17 +921,17 @@ export const Atendimento = ({ user }) => {
           </div>
 
           {/* Right column - detail + respostas rápidas (desktop only) */}
-          <div className="hidden lg:flex flex-1 min-w-0 gap-3">
-            <div className="flex-1 min-w-0">
+          <div className="hidden lg:flex flex-1 min-w-0 min-h-0 gap-4">
+            <div className="flex-1 min-w-0 min-h-0 flex flex-col">
               {selectedQuestion ? (
                 <QuestionDetail key={selectedQuestion.id} question={selectedQuestion}
                   answerText={answerText} setAnswerText={setAnswerText}
                   onAnswer={handleAnswer} onDelete={handleDelete} answeringId={answeringId} />
               ) : (
-                <div className="h-full flex items-center justify-center bg-white rounded-xl border border-gray-200">
-                  <div className="text-center">
-                    <MessageSquare size={32} className="mx-auto text-gray-300 mb-2" />
-                    <p className="text-sm text-gray-400">Selecione uma pergunta para ver os detalhes</p>
+                <div className="flex-1 min-h-[18rem] flex items-center justify-center bg-white rounded-xl border border-gray-200">
+                  <div className="text-center px-6">
+                    <MessageSquare size={40} className="mx-auto text-gray-300 mb-3" />
+                    <p className="text-base text-gray-500 font-medium">Selecione uma pergunta para ver os detalhes</p>
                   </div>
                 </div>
               )}
