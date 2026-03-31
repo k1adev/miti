@@ -1,6 +1,4 @@
-# Apoli - Sistema de Gestão v2.0
-
-Uma aplicação web completa para hospedagem local com interface moderna, banco de dados SQLite, sistema de estoque avançado com SKUs compostos, integração com API do Bling e suporte a APIs externas.
+# Miti - Sistema de Gestão v2.0
 
 ## 🚀 Características
 
