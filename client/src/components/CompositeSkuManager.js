@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Plus, Trash2, Package, Settings, AlertTriangle } from 'lucide-react';
 import axios from 'axios';
+import { useToast } from './Toast';
 
 // Função utilitária para limpar o 'B' do final do SKU
 function limparSkuB(sku) {
@@ -8,6 +9,7 @@ function limparSkuB(sku) {
 }
 
 export const CompositeSkuManager = ({ mainSku, onClose, onUpdate }) => {
+  const toast = useToast();
   const [components, setComponents] = useState([]);
   const [availableItems, setAvailableItems] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -55,7 +57,7 @@ export const CompositeSkuManager = ({ mainSku, onClose, onUpdate }) => {
       if (onUpdate) onUpdate();
     } catch (error) {
       console.error('Erro ao adicionar componente:', error);
-      alert('Erro ao adicionar componente. Verifique os dados.');
+      toast.error('Erro ao adicionar componente. Verifique os dados.');
     }
   };
 
@@ -92,7 +94,7 @@ export const CompositeSkuManager = ({ mainSku, onClose, onUpdate }) => {
                     if (onUpdate) onUpdate();
                     if (onClose) onClose();
                   } catch (error) {
-                    alert('Erro ao excluir SKU.');
+                    toast.error('Erro ao excluir SKU.');
                   }
                 }
               }}

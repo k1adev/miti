@@ -1,0 +1,32 @@
+# fly.toml — app de produção (miti.fly.dev)
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'miti'
+primary_region = 'gru'
+
+[env]
+  PORT = '3001'
+  HOST = '0.0.0.0'
+  NODE_ENV = 'production'
+  DB_PATH = '/data/database.sqlite'
+
+[[mounts]]
+  source = 'data'
+  destination = '/data'
+
+[http_service]
+  internal_port = 3001
+  force_https = true
+  auto_start_machines = true
+  auto_stop_machines = 'off'
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[http_service.checks]]
+    interval = "10s"
+    timeout = "2s"
+    grace_period = "15s"
+    method = "get"
+    path = "/health"

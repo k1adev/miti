@@ -1,0 +1,27 @@
+SKU,EAN,Título,Quantidade,Localização,Quantidade Mínima,Quantidade Máxima,Categoria,Fornecedor,Preço de Custo,Preço de Venda,Observações,SKU Composto
+BASE001,7891234567890,Base Metálica para Montagem,50,Prateleira A1,5,100,Componentes,Fornecedor A,15.50,25.00,Base padrão para kits,0
+PAR001,7891234567891,Parafusos M6x20mm,200,Prateleira A2,20,500,Parafusos,Fornecedor B,0.50,1.00,Parafusos de aço inox,0
+MAN001,7891234567892,Manual de Instruções,30,Prateleira A3,3,100,Documentação,Fornecedor C,2.00,5.00,Manual em português,0
+KIT001,7891234567893,Kit de Montagem Completo,0,Prateleira B1,2,50,Kits,Interno,0.00,35.00,Kit montado com componentes,1
+FERR001,7891234567894,Ferramenta Chave Phillips,25,Prateleira A4,3,50,Ferramentas,Fornecedor D,8.00,15.00,Chave Phillips #2,0
+EMB001,7891234567895,Embalagem Plástica,100,Prateleira A5,10,200,Embalagens,Fornecedor E,1.50,3.00,Embalagem transparente,0
+ETI001,7891234567896,Etiqueta Identificação,500,Prateleira A6,50,1000,Etiquetas,Fornecedor F,0.10,0.25,Etiquetas adesivas,0
+KIT002,7891234567897,Kit Ferramentas Básico,0,Prateleira B2,1,20,Kits,Interno,0.00,45.00,Kit com ferramentas essenciais,1
+PROD001,7891234567898,Produto Final Teste,10,Prateleira C1,2,30,Produtos Finais,Interno,0.00,60.00,Produto para demonstração,0
+COMP001,7891234567899,Componente Eletrônico,75,Prateleira A7,10,200,Eletrônicos,Fornecedor G,12.00,20.00,Componente de qualidade,0
+SKU001,7891234567890,Notebook Dell Inspiron 15,5,Prateleira A1,2,10,Eletrônicos,Dell Brasil,2500.00,3200.00,Notebook para uso empresarial
+SKU002,7891234567891,Mouse Wireless Logitech,25,Prateleira A2,5,50,Eletrônicos,Logitech,45.00,89.90,Mouse sem fio com sensor óptico
+SKU003,7891234567892,Camiseta Básica M,15,Prateleira B1,3,30,Vestuário,Fornecedor A,25.00,59.90,Camiseta 100% algodão
+SKU004,7891234567893,Livro JavaScript Avançado,8,Prateleira C1,2,20,Livros,Editora Tech,35.00,79.90,Livro sobre JavaScript ES6+
+SKU005,7891234567894,Vaso Decorativo Cerâmica,12,Prateleira D1,4,25,Casa,Cerâmica Art,80.00,159.90,Vaso decorativo 30cm altura
+SKU006,7891234567895,Teclado Mecânico RGB,3,Prateleira A3,1,15,Eletrônicos,Razer,180.00,299.90,Teclado mecânico com switches blue
+SKU007,7891234567896,Calça Jeans Masculina,20,Prateleira B2,5,40,Vestuário,Fornecedor B,60.00,129.90,Calça jeans slim fit
+SKU008,7891234567897,Luminária de Mesa LED,7,Prateleira D2,2,15,Casa,Iluminação Pro,120.00,249.90,Luminária com controle de intensidade
+SKU009,7891234567898,Webcam HD 1080p,4,Prateleira A4,1,10,Eletrônicos,Logitech,95.00,189.90,Webcam para reuniões online
+SKU010,7891234567899,Organizador de Gavetas,18,Prateleira D3,3,25,Casa,Organização Plus,45.00,89.90,Organizador plástico 5 gavetas
+SKU011,7891234567900,Kit Montagem Básico,0,Prateleira E1,5,20,Outros,Kit Express,0.00,150.00,SKU COMPOSTO - Montar após configurar componentes
+SKU012,7891234567901,Parafuso M6x20,100,Prateleira F1,20,200,Outros,Parafusos Ltda,0.50,1.20,Parafuso sextavado M6x20mm
+SKU013,7891234567902,Base Metálica,50,Prateleira F2,10,100,Outros,Metalúrgica ABC,15.00,25.00,Base metálica 20x30cm
+SKU014,7891234567903,Kit Escritório Completo,0,Prateleira E2,2,10,Outros,Escritório Pro,0.00,299.90,SKU COMPOSTO - Inclui mesa, cadeira e acessórios
+SKU015,7891234567904,Mesa Escritório,8,Prateleira G1,2,15,Casa,Móveis XYZ,120.00,180.00,Mesa de escritório 120x60cm
+SKU016,7891234567905,Cadeira Escritório,12,Prateleira G2,3,20,Casa,Móveis XYZ,80.00,120.00,Cadeira ergonômica para escritório 

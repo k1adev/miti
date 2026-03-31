@@ -1,0 +1,26 @@
+# Ignorar dependências locais
+node_modules
+client/node_modules
+
+# Ignorar builds antigos
+dist
+client/build
+
+# Ignorar arquivos de configuração locais
+.env
+.env.*
+
+# Ignorar arquivos temporários e de sistema
+*.log
+*.tmp
+*.swp
+.DS_Store
+Thumbs.db
+
+# Ignorar arquivos de controle de versão
+.git
+.gitignore
+
+# Ignorar arquivos de desenvolvimento
+*.local.js
+*.local.json

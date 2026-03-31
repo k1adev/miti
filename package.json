@@ -12,7 +12,9 @@
     "package": "npm run build && electron-builder",
     "package-win": "npm run build && electron-builder --win",
     "clean": "rimraf dist node_modules client/node_modules client/build",
-    "test": "echo \"No tests specified\" && exit 0"
+    "test": "echo \"No tests specified\" && exit 0",
+    "migrate:bling-tokens": "node scripts/migrar_tokens_bling.js",
+    "script:admin-password": "node scripts/alterar_senha_admin.js"
   },
   "keywords": [
     "gestao",
@@ -39,7 +41,10 @@
     "jspdf": "^3.0.1",
     "morgan": "^1.10.0",
     "multer": "^1.4.5-lts.1",
-    "sqlite3": "^5.1.6"
+    "sqlite3": "^5.1.6",
+    "xlsx": "^0.18.5",
+    "cheerio": "^1.0.0-rc.12",
+    "archiver": "^6.0.0"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",

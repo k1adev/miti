@@ -2,15 +2,19 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   Plus, Edit as EditIcon, Trash2, Package, Search, Download, Upload, 
   TrendingUp, AlertTriangle, MapPin, Barcode, Hash, Settings, 
-  Wrench, CheckCircle, Funnel, Star 
+  Wrench, CheckCircle, Funnel, Star, RefreshCw, ChevronDown
 } from 'lucide-react';
 import axios from 'axios';
 import { InventoryImport } from './InventoryImport';
 import { CompositeSkuManager } from './CompositeSkuManager';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { useDebounce } from '../hooks/useDebounce';
+import { useToast } from './Toast';
 
 export const Inventory = ({ user }) => {
   const location = useLocation();
+  const navigate = useNavigate();
+  const toast = useToast();
   const [inventory, setInventory] = useState([]);
   const [fullInventory, setFullInventory] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -22,6 +26,8 @@ export const Inventory = ({ user }) => {
   const [compositeInfo, setCompositeInfo] = useState(null);
   const [compositeStocks, setCompositeStocks] = useState({});
   const [activeTab, setActiveTab] = useState('itens');
+  const [blingAccounts, setBlingAccounts] = useState([]);
+  const [activeAccountFilter, setActiveAccountFilter] = useState('all');
   const [compositeList, setCompositeList] = useState([]);
   const [showCreateComposite, setShowCreateComposite] = useState(false);
   const [compositeMainSku, setCompositeMainSku] = useState('');
@@ -41,6 +47,14 @@ export const Inventory = ({ user }) => {
   const [pageSize, setPageSize] = useState(20);
   const [totalFiltrado, setTotalFiltrado] = useState(0);
   
+  // Estados de imagem do SKU
+  const [imageUpload, setImageUpload] = useState({ mime: '', base64: '' });
+  const [imageBySku, setImageBySku] = useState({});
+  const [existingImageUrl, setExistingImageUrl] = useState('');
+  const [imageCache, setImageCache] = useState({});
+
+  const debouncedSearchTerm = useDebounce(searchTerm, 400);
+
   // Estados para paginação e pesquisa das movimentações
   const [movementsPage, setMovementsPage] = useState(1);
   const [movementsPageSize, setMovementsPageSize] = useState(20);
@@ -60,6 +74,7 @@ export const Inventory = ({ user }) => {
     supplier: '',
     cost_price: '',
     selling_price: '',
+    cubic_weight: '',
     notes: '',
     is_composite: false
   });
@@ -80,9 +95,14 @@ export const Inventory = ({ user }) => {
   const [showImportCompostoModal, setShowImportCompostoModal] = useState(false);
   const [cleaningKits, setCleaningKits] = useState(false);
   const [cleaningCompostos, setCleaningCompostos] = useState(false);
+  const [showCompostosActionsMenu, setShowCompostosActionsMenu] = useState(false);
+  const compostosActionsRef = useRef(null);
   const [aglutinados, setAglutinados] = useState([]);
   const [visualizarAglutinado, setVisualizarAglutinado] = useState(null);
   const [loadingAglutinados, setLoadingAglutinados] = useState(false);
+  const [aglutinadosPage, setAglutinadosPage] = useState(1);
+  const [aglutinadosPerPage, setAglutinadosPerPage] = useState(15);
+  const [aglutinadoMenuOpen, setAglutinadoMenuOpen] = useState(null);
 
   // Adicionar estados para filtros
   const [showFilter, setShowFilter] = useState(false);
@@ -101,18 +121,38 @@ export const Inventory = ({ user }) => {
   const [pinnedSkus, setPinnedSkus] = useState([]);
   const [loadingPins, setLoadingPins] = useState(false);
 
-  // Sincronizar aba ativa com o parâmetro 'tab' da URL
+  // Sincronizar aba ativa com o parâmetro 'tab' da URL (aba "Fluxo dia" / consulta removida)
   useEffect(() => {
     const params = new URLSearchParams(location.search);
     const tab = params.get('tab');
+    if (tab === 'consulta') {
+      setActiveTab('itens');
+      navigate('/inventory?tab=itens', { replace: true });
+      return;
+    }
     if (tab && ['itens', 'compostos', 'movimentacao', 'historico-aglutinados'].includes(tab) && tab !== activeTab) {
       setActiveTab(tab);
     }
-  }, [location.search, activeTab]);
+  }, [location.search, activeTab, navigate]);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const res = await axios.get('/api/bling/accounts');
+        const accounts = Array.isArray(res.data?.accounts) ? res.data.accounts : [];
+        if (!mounted) return;
+        setBlingAccounts(accounts);
+      } catch {
+        if (mounted) setBlingAccounts([]);
+      }
+    })();
+    return () => { mounted = false; };
+  }, []);
 
   useEffect(() => {
     fetchInventory();
-  }, [searchTerm, page, pageSize, filterLowStock, filterNoStock, filterWithStock]);
+  }, [debouncedSearchTerm, page, pageSize, filterLowStock, filterNoStock, filterWithStock]);
 
   useEffect(() => {
     if (activeTab === 'historico-aglutinados') {
@@ -149,25 +189,26 @@ export const Inventory = ({ user }) => {
     if (activeTab === 'movimentacao') {
       fetchMovements();
     }
-  }, [activeTab, movementsPage, movementsPageSize, movementsSearchTerm]);
+  }, [activeTab, movementsPage, movementsPageSize, movementsSearchTerm, activeAccountFilter]);
 
   // Ajustar o useEffect para fechar o menu apenas se o clique for fora do botão e do menu
   useEffect(() => {
-      function handleClickOutside(event) {
-    const btn = document.getElementById('btn-filtro');
-    const reportsBtn = document.getElementById('btn-relatorios');
-    
-    if (showFilter && btn && !btn.contains(event.target) && filterMenuRef.current && !filterMenuRef.current.contains(event.target)) {
-      setShowFilter(false);
+    function handleClickOutside(event) {
+      const btn = document.getElementById('btn-filtro');
+      const reportsBtn = document.getElementById('btn-relatorios');
+      if (showFilter && btn && !btn.contains(event.target) && filterMenuRef.current && !filterMenuRef.current.contains(event.target)) {
+        setShowFilter(false);
+      }
+      if (showReportsMenu && reportsBtn && !reportsBtn.contains(event.target) && reportsMenuRef.current && !reportsMenuRef.current.contains(event.target)) {
+        setShowReportsMenu(false);
+      }
+      if (showCompostosActionsMenu && compostosActionsRef.current && !compostosActionsRef.current.contains(event.target)) {
+        setShowCompostosActionsMenu(false);
+      }
     }
-    
-    if (showReportsMenu && reportsBtn && !reportsBtn.contains(event.target) && reportsMenuRef.current && !reportsMenuRef.current.contains(event.target)) {
-      setShowReportsMenu(false);
-    }
-  }
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [showFilter]);
+  }, [showFilter, showReportsMenu, showCompostosActionsMenu]);
 
   // Adicionar useEffect para resetar a página ao mudar qualquer filtro
   useEffect(() => {
@@ -235,7 +276,7 @@ export const Inventory = ({ user }) => {
       console.error('[FIXAR ITENS DEBUG] Detalhes do erro:', e.response?.data || e.message);
       // rollback visual se falhar
       setPinnedSkus(pinnedSkus);
-      alert('Erro ao atualizar SKUs fixados. Faça login novamente.');
+      toast.error('Erro ao atualizar SKUs fixados. Faça login novamente.');
     } finally {
       setLoadingPins(false);
       console.log('[FIXAR ITENS DEBUG] togglePin concluído');
@@ -304,8 +345,7 @@ export const Inventory = ({ user }) => {
     setLoading(true);
     try {
       const params = new URLSearchParams();
-      // Busca
-      if (searchTerm) params.append('search', searchTerm);
+      if (debouncedSearchTerm) params.append('search', debouncedSearchTerm);
       // Filtros do menu (REMOVIDO: não enviar para o backend)
       // if (filterLowStock) params.append('lowStock', 'true');
       // if (filterNoStock) params.append('noStock', 'true');
@@ -360,6 +400,9 @@ export const Inventory = ({ user }) => {
       }
       params.append('limit', movementsPageSize);
       params.append('offset', (movementsPage - 1) * movementsPageSize);
+      if (activeAccountFilter && activeAccountFilter !== 'all') {
+        params.append('accountId', activeAccountFilter);
+      }
       
       const res = await axios.get(`/api/stock-movements?${params}`);
       setMovements(res.data.movements || res.data || []);
@@ -409,16 +452,21 @@ export const Inventory = ({ user }) => {
     try {
       // Converter is_composite para 0 ou 1
       const dataToSend = { ...formData, is_composite: formData.is_composite ? 1 : 0 };
+      let savedSku = formData.sku;
       if (selectedItem) {
         await axios.put(`/api/inventory/${selectedItem.id}`, dataToSend);
       } else {
         await axios.post('/api/inventory', dataToSend);
       }
+      // Upload de imagem se houver
+      if (imageUpload.base64 && savedSku) {
+        await axios.post(`/api/inventory/${savedSku}/image`, { mime: imageUpload.mime, image_base64: imageUpload.base64 });
+      }
       resetForm();
       fetchInventory();
     } catch (error) {
       console.error('Erro ao salvar item:', error);
-      alert('Erro ao salvar item. Verifique os dados.');
+      toast.error('Erro ao salvar item. Verifique os dados.');
     }
   };
 
@@ -440,12 +488,54 @@ export const Inventory = ({ user }) => {
     } catch (error) {
       console.error('Erro na exportação:', error);
       if (error.response?.status === 403) {
-        alert('Acesso negado. Nível de usuário insuficiente.');
+        toast.error('Acesso negado. Nível de usuário insuficiente.');
       } else if (error.response?.status === 401) {
-        alert('Sessão expirada. Faça login novamente.');
+        toast.error('Sessão expirada. Faça login novamente.');
       } else {
-        alert('Erro na exportação.');
+        toast.error('Erro na exportação.');
       }
+    }
+  };
+
+  // Exportar imagens (CSV)
+  const handleExportImages = async () => {
+    try {
+      const res = await axios.get('/api/inventory/images/export-csv', { responseType: 'blob' });
+      const url = window.URL.createObjectURL(new Blob([res.data]));
+      const a = document.createElement('a'); a.href = url; a.download = 'inventory_images.csv'; a.click();
+      window.URL.revokeObjectURL(url);
+    } catch (e) {
+      toast.error('Erro ao exportar imagens.');
+    }
+  };
+
+  // Importar imagens em lote (CSV: SKU,MIME,BASE64) ou JSON
+  const [bulkImagesText, setBulkImagesText] = useState('');
+  const [showBulkImageModal, setShowBulkImageModal] = useState(false);
+  const handleImportImages = async () => {
+    let items = [];
+    const txt = bulkImagesText.trim();
+    try {
+      if (txt.startsWith('[')) {
+        items = JSON.parse(txt);
+      } else {
+        // CSV simples
+        const lines = txt.split(/\r?\n/).filter(l => l.trim());
+        const start = lines[0].toLowerCase().includes('sku') ? 1 : 0;
+        for (let i = start; i < lines.length; i++) {
+          const cols = lines[i].split(',');
+          if (cols.length < 3) continue;
+          const sku = cols[0].replace(/^"|"$/g,'').trim();
+          const mime = cols[1].replace(/^"|"$/g,'').trim();
+          const b64 = cols.slice(2).join(',').replace(/^"|"$/g,'').trim();
+          items.push({ sku, mime, image_base64: b64 });
+        }
+      }
+      const res = await axios.post('/api/inventory/images/bulk', items);
+      toast.success(`Importadas: ${res.data.imported} | Falhas: ${res.data.failed}`);
+      setShowBulkImageModal(false); setBulkImagesText('');
+    } catch (e) {
+      toast.error('Erro ao importar imagens (verifique o formato).');
     }
   };
 
@@ -467,11 +557,11 @@ export const Inventory = ({ user }) => {
     } catch (error) {
       console.error('Erro na exportação do relatório de estoque baixo:', error);
       if (error.response?.status === 403) {
-        alert('Acesso negado. Nível de usuário insuficiente.');
+        toast.error('Acesso negado. Nível de usuário insuficiente.');
       } else if (error.response?.status === 401) {
-        alert('Sessão expirada. Faça login novamente.');
+        toast.error('Sessão expirada. Faça login novamente.');
       } else {
-        alert('Erro na exportação do relatório.');
+        toast.error('Erro na exportação do relatório.');
       }
     }
   };
@@ -494,11 +584,11 @@ export const Inventory = ({ user }) => {
     } catch (error) {
       console.error('Erro na exportação do relatório de sem estoque:', error);
       if (error.response?.status === 403) {
-        alert('Acesso negado. Nível de usuário insuficiente.');
+        toast.error('Acesso negado. Nível de usuário insuficiente.');
       } else if (error.response?.status === 401) {
-        alert('Sessão expirada. Faça login novamente.');
+        toast.error('Sessão expirada. Faça login novamente.');
       } else {
-        alert('Erro na exportação do relatório.');
+        toast.error('Erro na exportação do relatório.');
       }
     }
   };
@@ -516,6 +606,7 @@ export const Inventory = ({ user }) => {
 
   const handleEdit = (item) => {
     setSelectedItem(item);
+    setImageUpload({ mime: '', base64: '' });
     setFormData({
       sku: item.sku,
       ean: item.ean || '',
@@ -528,6 +619,7 @@ export const Inventory = ({ user }) => {
       supplier: item.supplier || '',
       cost_price: item.cost_price || '',
       selling_price: item.selling_price || '',
+      cubic_weight: item.cubic_weight || '',
       notes: item.notes || '',
       is_composite: item.is_composite || false
     });
@@ -556,11 +648,14 @@ export const Inventory = ({ user }) => {
       supplier: '',
       cost_price: '',
       selling_price: '',
+      cubic_weight: '',
       notes: '',
       is_composite: false
     });
     setSelectedItem(null);
     setShowForm(false);
+    setImageUpload({ mime: '', base64: '' });
+    setExistingImageUrl('');
   };
 
   const getStockStatus = (item) => {
@@ -615,16 +710,15 @@ export const Inventory = ({ user }) => {
       return;
     }
     
-    // Buscar os IDs a partir dos SKUs digitados
-    const mainItem = fullInventory.find(i => i.sku === compositeMainSku);
+    // Buscar os IDs a partir dos SKUs digitados (usa limparSkuB para 95095 = 95095B)
+    const mainItem = fullInventory.find(i => limparSkuB(String(i.sku || '')) === limparSkuB(String(compositeMainSku || '')));
     if (!mainItem) {
       setCompositeError('SKU principal não encontrado.');
       return;
     }
     
-    // Verificar se todos os componentes existem
     const componentsWithId = compositeComponents.map(c => {
-      const compItem = fullInventory.find(i => i.sku === c.sku);
+      const compItem = fullInventory.find(i => limparSkuB(String(i.sku || '')) === limparSkuB(String(c.sku || '')));
       return compItem ? { ...c, id: compItem.id } : null;
     });
     if (componentsWithId.some(c => !c)) {
@@ -640,7 +734,6 @@ export const Inventory = ({ user }) => {
           component_sku_id: Number(comp.id),
           quantity: Number(comp.quantity)
         };
-        console.log('Enviando componente para /api/composite-skus:', payload);
         await axios.post('/api/composite-skus', payload);
       }
       
@@ -653,8 +746,9 @@ export const Inventory = ({ user }) => {
       setCompositeComponents([{ sku: '', quantity: 1 }]);
       fetchCompositeList();
       fetchInventory();
+      toast.success('SKU composto criado com sucesso.');
     } catch (err) {
-      setCompositeError('Erro ao criar SKU composto. Verifique os dados.');
+      setCompositeError(err?.response?.data?.error || 'Erro ao criar SKU composto. Verifique os dados.');
     }
   };
 
@@ -676,13 +770,12 @@ export const Inventory = ({ user }) => {
       setKitError('A quantidade deve ser maior que zero.');
       return;
     }
-    if (kitMainSku === kitComponentSku) {
+    if (limparSkuB(String(kitMainSku || '')) === limparSkuB(String(kitComponentSku || ''))) {
       setKitError('O SKU principal não pode ser o mesmo do componente.');
       return;
     }
-    // Buscar os IDs a partir dos SKUs digitados
-    const mainItem = fullInventory.find(i => i.sku === kitMainSku);
-    const componentItem = fullInventory.find(i => i.sku === kitComponentSku);
+    const mainItem = fullInventory.find(i => limparSkuB(String(i.sku || '')) === limparSkuB(String(kitMainSku || '')));
+    const componentItem = fullInventory.find(i => limparSkuB(String(i.sku || '')) === limparSkuB(String(kitComponentSku || '')));
     if (!mainItem || !componentItem) {
       setKitError('SKU principal ou componente não encontrado.');
       return;
@@ -693,7 +786,6 @@ export const Inventory = ({ user }) => {
         component_sku_id: Number(componentItem.id),
         quantity: Number(kitQuantity)
       };
-      console.log('Enviando kit para /api/composite-skus:', payload);
       await axios.post('/api/composite-skus', payload);
       await axios.put(`/api/inventory/${mainItem.id}`, { ...mainItem, is_composite: 1 });
       
@@ -703,8 +795,9 @@ export const Inventory = ({ user }) => {
       setKitQuantity(1);
       fetchCompositeList();
       fetchInventory();
+      toast.success('Kit criado com sucesso.');
     } catch (err) {
-      setKitError('Erro ao criar kit. Verifique os dados.');
+      setKitError(err?.response?.data?.error || 'Erro ao criar kit. Verifique os dados.');
     }
   };
 
@@ -725,24 +818,22 @@ export const Inventory = ({ user }) => {
       setEditingError('Preencha todos os SKUs e quantidades.');
       return;
     }
-    if (editingComponents.some(c => c.sku === editingMainSku)) {
+    if (editingComponents.some(c => limparSkuB(String(c.sku || '')) === limparSkuB(String(editingMainSku || '')))) {
       setEditingError('O SKU principal não pode ser um componente.');
       return;
     }
-    const skus = editingComponents.map(c => c.sku);
+    const skus = editingComponents.map(c => limparSkuB(String(c.sku || '')));
     if (new Set(skus).size !== skus.length) {
       setEditingError('Não repita SKUs nos componentes.');
       return;
     }
-    // Buscar o ID do SKU principal
-    const mainItem = inventory.find(i => i.sku === editingMainSku);
+    const mainItem = fullInventory.find(i => limparSkuB(String(i.sku || '')) === limparSkuB(String(editingMainSku || '')));
     if (!mainItem) {
       setEditingError('SKU principal não encontrado.');
       return;
     }
-    // Buscar os IDs dos componentes
     const componentsWithId = editingComponents.map(c => {
-      const compItem = inventory.find(i => i.sku === c.sku);
+      const compItem = fullInventory.find(i => limparSkuB(String(i.sku || '')) === limparSkuB(String(c.sku || '')));
       return compItem ? { ...c, id: compItem.id } : null;
     });
     if (componentsWithId.some(c => !c)) {
@@ -778,8 +869,8 @@ export const Inventory = ({ user }) => {
   // 2. Função para abrir edição de kit
   function handleEditKit(kit) {
     setEditingKit(kit);
-    setEditingKitMainSku(inventory.find(i => i.id === kit.main_sku_id)?.sku || '');
-    setEditingKitComponentSku(inventory.find(i => i.id === kit.components[0].component_sku_id)?.sku || '');
+    setEditingKitMainSku(fullInventory.find(i => i.id === kit.main_sku_id)?.sku || kit.main_sku || '');
+    setEditingKitComponentSku(fullInventory.find(i => i.id === kit.components[0].component_sku_id)?.sku || kit.components[0].component_sku || '');
     setEditingKitQuantity(kit.components[0].quantity);
     setEditingKitError('');
     setShowCreateComposite(false);
@@ -794,12 +885,12 @@ export const Inventory = ({ user }) => {
       setEditingKitError('Preencha todos os campos corretamente.');
       return;
     }
-    if (editingKitMainSku === editingKitComponentSku) {
+    if (limparSkuB(String(editingKitMainSku || '')) === limparSkuB(String(editingKitComponentSku || ''))) {
       setEditingKitError('O SKU principal não pode ser o mesmo do componente.');
       return;
     }
-    const mainItem = fullInventory.find(i => i.sku === editingKitMainSku);
-    const componentItem = fullInventory.find(i => i.sku === editingKitComponentSku);
+    const mainItem = fullInventory.find(i => limparSkuB(String(i.sku || '')) === limparSkuB(String(editingKitMainSku || '')));
+    const componentItem = fullInventory.find(i => limparSkuB(String(i.sku || '')) === limparSkuB(String(editingKitComponentSku || '')));
     if (!mainItem || !componentItem) {
       setEditingKitError('SKU principal ou componente não encontrado.');
       return;
@@ -830,6 +921,7 @@ export const Inventory = ({ user }) => {
     const [csvData, setCsvData] = useState('');
     const [loading, setLoading] = useState(false);
     const [result, setResult] = useState(null);
+    const findItemBySku = (sku) => fullInventory.find(i => limparSkuB(String(i.sku || '')) === limparSkuB(String(sku || '')));
     const handleFileUpload = (e) => {
       const file = e.target.files[0];
       if (file) {
@@ -837,7 +929,7 @@ export const Inventory = ({ user }) => {
         reader.onload = (event) => {
           setCsvData(event.target.result);
         };
-        reader.readAsText(file);
+        reader.readAsText(file, 'UTF-8');
       }
     };
     const handleImport = async (e) => {
@@ -858,11 +950,12 @@ export const Inventory = ({ user }) => {
             continue;
           }
           const [mainSku, compSku, qty] = cols;
-          const mainItem = fullInventory.find(i => i.sku == mainSku);
-          const componentItem = fullInventory.find(i => i.sku == compSku);
+          const mainItem = findItemBySku(mainSku);
+          const componentItem = findItemBySku(compSku);
           if (!mainItem || !componentItem) {
             fail++;
-            errors.push(`Linha ${i+1}: SKU não encontrado`);
+            const missing = [!mainItem && mainSku, !componentItem && compSku].filter(Boolean).join(', ');
+            errors.push(`Linha ${i+1}: SKU não encontrado no estoque (${missing})`);
             continue;
           }
           try {
@@ -882,22 +975,59 @@ export const Inventory = ({ user }) => {
         setResult({ ok, fail, errors });
         fetchCompositeList();
         fetchInventory();
+        if (ok > 0) toast.success(`${ok} kit(s) importado(s) com sucesso.`);
       } catch (err) {
         setResult({ ok: 0, fail: 1, errors: [err.message] });
+        toast.error('Erro ao importar kits.');
       }
       setLoading(false);
     };
+    const templateCsv = 'SKU_PRINCIPAL,SKU_COMPONENTE,QUANTIDADE\n95095,S0130,2\n';
+    const downloadTemplate = () => {
+      const blob = new Blob([templateCsv], { type: 'text/csv;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'template_kits.csv';
+      a.click();
+      URL.revokeObjectURL(a.href);
+    };
     return (
-      <div className="fixed inset-0 bg-black bg-opacity-30 flex items-center justify-center z-50">
-        <div className="bg-white rounded-lg shadow-lg p-6 w-full max-w-lg">
-          <h2 className="text-lg font-bold mb-2">Importar Kits via CSV</h2>
-          <input type="file" accept=".csv" onChange={handleFileUpload} className="mb-2" />
-          <textarea className="input-field w-full mb-2" rows={8} value={csvData} onChange={e => setCsvData(e.target.value)} placeholder="SKU_PRINCIPAL,SKU_COMPONENTE,QUANTIDADE\n95437,52525,2\n..." />
-          <div className="flex gap-2 mb-2">
-            <button className="btn-primary" onClick={handleImport} disabled={loading}>{loading ? 'Importando...' : 'Importar'}</button>
-            <button className="btn-secondary" onClick={() => setShowImportKitModal(false)} disabled={loading}>Fechar</button>
+      <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-xl w-full max-w-lg">
+          <div className="p-6 border-b border-gray-200 dark:border-gray-700">
+            <h2 className="text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2">
+              <Upload className="w-5 h-5 text-blue-600" />
+              Importar Kits via CSV
+            </h2>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Formato: SKU principal, SKU componente, quantidade (3 colunas)</p>
           </div>
-          {result && (<div className="mt-2 text-sm"><b>{result.ok}</b> importados, <b>{result.fail}</b> falharam.<br/>{result.errors && result.errors.length > 0 && (<ul className="text-red-600 list-disc ml-5">{result.errors.map((e,i) => <li key={i}>{e}</li>)}</ul>)}</div>)}
+          <div className="p-6 space-y-4">
+            <div className="flex gap-2">
+              <label className="flex-1 flex items-center justify-center gap-2 px-4 py-3 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg cursor-pointer hover:border-blue-500 hover:bg-blue-50/50 dark:hover:bg-blue-900/20 transition-colors">
+                <Upload className="w-5 h-5 text-gray-500" />
+                <span className="text-sm font-medium">Selecionar arquivo CSV</span>
+                <input type="file" accept=".csv,.txt" onChange={handleFileUpload} className="hidden" />
+              </label>
+              <button type="button" onClick={downloadTemplate} className="btn-secondary whitespace-nowrap">
+                <Download className="w-4 h-4 mr-1 inline" /> Template
+              </button>
+            </div>
+            <textarea className="input-field w-full text-sm font-mono" rows={6} value={csvData} onChange={e => setCsvData(e.target.value)} placeholder={'SKU_PRINCIPAL,SKU_COMPONENTE,QUANTIDADE\n95095,S0130,2\n95437,52525,2'} />
+            <div className="flex gap-2">
+              <button className="btn-primary flex-1" onClick={handleImport} disabled={loading || !csvData.trim()}>
+                {loading ? 'Importando...' : 'Importar'}
+              </button>
+              <button className="btn-secondary" onClick={() => setShowImportKitModal(false)} disabled={loading}>Fechar</button>
+            </div>
+            {result && (
+              <div className={`p-3 rounded-lg text-sm ${result.fail > 0 ? 'bg-amber-50 dark:bg-amber-900/20 text-amber-800 dark:text-amber-200' : 'bg-green-50 dark:bg-green-900/20 text-green-800 dark:text-green-200'}`}>
+                <strong>{result.ok}</strong> importados, <strong>{result.fail}</strong> falharam.
+                {result.errors?.length > 0 && (
+                  <ul className="mt-2 list-disc ml-5 text-red-600 dark:text-red-400 max-h-24 overflow-y-auto">{result.errors.slice(0, 10).map((e,i) => <li key={i}>{e}</li>)}{result.errors.length > 10 && <li>... e mais {result.errors.length - 10} erros</li>}</ul>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       </div>
     );
@@ -908,6 +1038,7 @@ export const Inventory = ({ user }) => {
     const [csvData, setCsvData] = useState('');
     const [loading, setLoading] = useState(false);
     const [result, setResult] = useState(null);
+    const findItemBySku = (sku) => fullInventory.find(i => limparSkuB(String(i.sku || '')) === limparSkuB(String(sku || '')));
     const handleFileUpload = (e) => {
       const file = e.target.files[0];
       if (file) {
@@ -915,7 +1046,7 @@ export const Inventory = ({ user }) => {
         reader.onload = (event) => {
           setCsvData(event.target.result);
         };
-        reader.readAsText(file);
+        reader.readAsText(file, 'UTF-8');
       }
     };
     const handleImport = async (e) => {
@@ -936,10 +1067,10 @@ export const Inventory = ({ user }) => {
             continue;
           }
           const mainSku = cols[0];
-          const mainItem = fullInventory.find(i => i.sku == mainSku);
+          const mainItem = findItemBySku(mainSku);
           if (!mainItem) {
             fail++;
-            errors.push(`Linha ${i+1}: SKU principal não encontrado`);
+            errors.push(`Linha ${i+1}: SKU principal '${mainSku}' não encontrado no estoque`);
             continue;
           }
           let allOk = true;
@@ -947,7 +1078,7 @@ export const Inventory = ({ user }) => {
           for (let j = 1; j < cols.length; j += 2) {
             const compSku = cols[j];
             const qty = cols[j+1];
-            const compItem = fullInventory.find(i => i.sku == compSku);
+            const compItem = findItemBySku(compSku);
             if (!compItem) {
               allOk = false;
               errors.push(`Linha ${i+1}: componente '${compSku}' não encontrado`);
@@ -975,22 +1106,59 @@ export const Inventory = ({ user }) => {
         setResult({ ok, fail, errors });
         fetchCompositeList();
         fetchInventory();
+        if (ok > 0) toast.success(`${ok} composto(s) importado(s) com sucesso.`);
       } catch (err) {
         setResult({ ok: 0, fail: 1, errors: [err.message] });
+        toast.error('Erro ao importar compostos.');
       }
       setLoading(false);
     };
+    const templateCsv = 'SKU_PRINCIPAL,COMP1,QTD1,COMP2,QTD2\n12345,S0130,2,S0140,1\n';
+    const downloadTemplate = () => {
+      const blob = new Blob([templateCsv], { type: 'text/csv;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'template_compostos.csv';
+      a.click();
+      URL.revokeObjectURL(a.href);
+    };
     return (
-      <div className="fixed inset-0 bg-black bg-opacity-30 flex items-center justify-center z-50">
-        <div className="bg-white rounded-lg shadow-lg p-6 w-full max-w-lg">
-          <h2 className="text-lg font-bold mb-2">Importar SKUs Compostos via CSV</h2>
-          <input type="file" accept=".csv" onChange={handleFileUpload} className="mb-2" />
-          <textarea className="input-field w-full mb-2" rows={8} value={csvData} onChange={e => setCsvData(e.target.value)} placeholder="SKU_PRINCIPAL,COMP1,QTD1,COMP2,QTD2,...\n12345,111,2,222,3\n..." />
-          <div className="flex gap-2 mb-2">
-            <button className="btn-primary" onClick={handleImport} disabled={loading}>{loading ? 'Importando...' : 'Importar'}</button>
-            <button className="btn-secondary" onClick={() => setShowImportCompostoModal(false)} disabled={loading}>Fechar</button>
+      <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-xl w-full max-w-lg">
+          <div className="p-6 border-b border-gray-200 dark:border-gray-700">
+            <h2 className="text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2">
+              <Upload className="w-5 h-5 text-blue-600" />
+              Importar SKUs Compostos via CSV
+            </h2>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Formato: SKU principal, COMP1, QTD1, COMP2, QTD2, ... (ímpar de colunas)</p>
           </div>
-          {result && (<div className="mt-2 text-sm"><b>{result.ok}</b> importados, <b>{result.fail}</b> falharam.<br/>{result.errors && result.errors.length > 0 && (<ul className="text-red-600 list-disc ml-5">{result.errors.map((e,i) => <li key={i}>{e}</li>)}</ul>)}</div>)}
+          <div className="p-6 space-y-4">
+            <div className="flex gap-2">
+              <label className="flex-1 flex items-center justify-center gap-2 px-4 py-3 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg cursor-pointer hover:border-blue-500 hover:bg-blue-50/50 dark:hover:bg-blue-900/20 transition-colors">
+                <Upload className="w-5 h-5 text-gray-500" />
+                <span className="text-sm font-medium">Selecionar arquivo CSV</span>
+                <input type="file" accept=".csv,.txt" onChange={handleFileUpload} className="hidden" />
+              </label>
+              <button type="button" onClick={downloadTemplate} className="btn-secondary whitespace-nowrap">
+                <Download className="w-4 h-4 mr-1 inline" /> Template
+              </button>
+            </div>
+            <textarea className="input-field w-full text-sm font-mono" rows={6} value={csvData} onChange={e => setCsvData(e.target.value)} placeholder={'SKU_PRINCIPAL,COMP1,QTD1,COMP2,QTD2\n12345,S0130,2,S0140,1'} />
+            <div className="flex gap-2">
+              <button className="btn-primary flex-1" onClick={handleImport} disabled={loading || !csvData.trim()}>
+                {loading ? 'Importando...' : 'Importar'}
+              </button>
+              <button className="btn-secondary" onClick={() => setShowImportCompostoModal(false)} disabled={loading}>Fechar</button>
+            </div>
+            {result && (
+              <div className={`p-3 rounded-lg text-sm ${result.fail > 0 ? 'bg-amber-50 dark:bg-amber-900/20 text-amber-800 dark:text-amber-200' : 'bg-green-50 dark:bg-green-900/20 text-green-800 dark:text-green-200'}`}>
+                <strong>{result.ok}</strong> importados, <strong>{result.fail}</strong> falharam.
+                {result.errors?.length > 0 && (
+                  <ul className="mt-2 list-disc ml-5 text-red-600 dark:text-red-400 max-h-24 overflow-y-auto">{result.errors.slice(0, 10).map((e,i) => <li key={i}>{e}</li>)}{result.errors.length > 10 && <li>... e mais {result.errors.length - 10} erros</li>}</ul>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       </div>
     );
@@ -998,35 +1166,53 @@ export const Inventory = ({ user }) => {
 
   // 2. Função para limpar todos os kits
   async function handleCleanKits() {
+    if (!window.confirm('Tem certeza que deseja remover TODOS os kits? Esta ação não pode ser desfeita.')) return;
     setCleaningKits(true);
     try {
       const res = await axios.get('/api/composite-skus');
-      // Deletar todos os vínculos de kits (com 1 componente)
-      const allLinks = res.data.flatMap(c => c.components.map(comp => ({ main: c.main_sku_id, id: comp.id, count: c.components.length })));
-      const kitLinks = allLinks.filter(l => l.count === 1);
-      for (const link of kitLinks) {
-        await axios.delete(`/api/composite-skus/${link.id}`);
+      const kitEntries = res.data.filter(c => c.components.length === 1);
+      const mainIds = [...new Set(kitEntries.map(c => c.main_sku_id))];
+      for (const c of kitEntries) {
+        for (const comp of c.components) {
+          if (comp.id) await axios.delete(`/api/composite-skus/${comp.id}`);
+        }
+      }
+      for (const mid of mainIds) {
+        const item = fullInventory.find(i => i.id === mid);
+        if (item) await axios.put(`/api/inventory/${mid}`, { ...item, is_composite: 0 });
       }
       fetchCompositeList();
       fetchInventory();
-    } catch {}
+      toast.success(`${kitEntries.length} kit(s) removido(s).`);
+    } catch (err) {
+      toast.error('Erro ao limpar kits.');
+    }
     setCleaningKits(false);
   }
 
   // 3. Função para limpar todos os compostos
   async function handleCleanCompostos() {
+    if (!window.confirm('Tem certeza que deseja remover TODOS os SKUs compostos? Esta ação não pode ser desfeita.')) return;
     setCleaningCompostos(true);
     try {
       const res = await axios.get('/api/composite-skus');
-      // Deletar todos os vínculos de compostos (com 2+ componentes)
-      const allLinks = res.data.flatMap(c => c.components.map(comp => ({ main: c.main_sku_id, id: comp.id, count: c.components.length })));
-      const compLinks = allLinks.filter(l => l.count > 1);
-      for (const link of compLinks) {
-        await axios.delete(`/api/composite-skus/${link.id}`);
+      const compEntries = res.data.filter(c => c.components.length > 1);
+      const mainIds = [...new Set(compEntries.map(c => c.main_sku_id))];
+      for (const c of compEntries) {
+        for (const comp of c.components) {
+          if (comp.id) await axios.delete(`/api/composite-skus/${comp.id}`);
+        }
+      }
+      for (const mid of mainIds) {
+        const item = fullInventory.find(i => i.id === mid);
+        if (item) await axios.put(`/api/inventory/${mid}`, { ...item, is_composite: 0 });
       }
       fetchCompositeList();
       fetchInventory();
-    } catch {}
+      toast.success(`${compEntries.length} composto(s) removido(s).`);
+    } catch (err) {
+      toast.error('Erro ao limpar compostos.');
+    }
     setCleaningCompostos(false);
   }
 
@@ -1034,6 +1220,58 @@ export const Inventory = ({ user }) => {
   function limparSkuB(sku) {
     return typeof sku === 'string' ? sku.replace(/B$/, '') : sku;
   }
+
+  const getAccountLabel = (accountId) => {
+    const match = blingAccounts.find(acc => Number(acc.id) === Number(accountId));
+    return match?.name || (accountId ? `Conta ${accountId}` : '—');
+  };
+
+  async function onImageFileSelected(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const full = String(ev.target.result || '');
+      const base64 = full.includes(',') ? full.split(',')[1] : full;
+      setImageUpload({ mime: file.type, base64 });
+    };
+    reader.readAsDataURL(file);
+  }
+
+  // Carregar imagem existente ao abrir o modal de edição
+  useEffect(() => {
+    const sku = selectedItem?.sku ? String(selectedItem.sku).replace(/[^0-9A-Za-z_-]/g, '') : '';
+    if (!sku) { setExistingImageUrl(''); return; }
+    const cached = imageBySku[sku] || imageCache[sku];
+    if (cached) { setExistingImageUrl(cached); return; }
+    (async () => {
+      try {
+        const res = await axios.get(`/api/inventory/${encodeURIComponent(sku)}/image`, { validateStatus: () => true });
+        if (res.status === 200 && res.data?.image_base64 && res.data?.mime) {
+          setExistingImageUrl(`data:${res.data.mime};base64,${res.data.image_base64}`);
+        } else {
+          setExistingImageUrl('');
+        }
+      } catch {
+        setExistingImageUrl('');
+      }
+    })();
+  }, [selectedItem, imageBySku, imageCache]);
+
+  // Buscar miniaturas para os itens visíveis
+  useEffect(() => {
+    const visibleSkus = sortedPaginatedItems.map(i => i.sku).filter(Boolean);
+    visibleSkus.forEach(async (sku) => {
+      if (imageBySku[sku]) return;
+      try {
+        const res = await axios.get(`/api/inventory/${encodeURIComponent(sku)}/image`, { validateStatus: () => true });
+        if (res.status === 200 && res.data?.image_base64 && res.data?.mime) {
+          const dataUrl = `data:${res.data.mime};base64,${res.data.image_base64}`;
+          setImageBySku(prev => ({ ...prev, [sku]: dataUrl }));
+        }
+      } catch {}
+    });
+    // eslint-disable-next-line
+  }, [sortedPaginatedItems.length, page, pageSize]);
 
   return (
     <div className="space-y-6">
@@ -1075,6 +1313,24 @@ export const Inventory = ({ user }) => {
                       className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 border-b border-gray-100 dark:border-gray-600"
                     >
                       Exportar Todos
+                    </button>
+                    <button
+                      onClick={() => {
+                        handleExportImages();
+                        setShowReportsMenu(false);
+                      }}
+                      className="w-full text-left px-4 py-2 text-sm text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-900 border-b border-gray-100 dark:border-gray-600"
+                    >
+                      Exportar Imagens (CSV)
+                    </button>
+                    <button
+                      onClick={() => {
+                        setShowBulkImageModal(true);
+                        setShowReportsMenu(false);
+                      }}
+                      className="w-full text-left px-4 py-2 text-sm text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-900 border-b border-gray-100 dark:border-gray-600"
+                    >
+                      Importar Imagens (CSV/JSON)
                     </button>
                     <button
                       onClick={() => {
@@ -1210,6 +1466,21 @@ export const Inventory = ({ user }) => {
             />
           )}
 
+          {/* Modal de importação de imagens */}
+          {showBulkImageModal && (
+            <div className="fixed inset-0 bg-black bg-opacity-30 flex items-center justify-center z-50">
+              <div className="bg-white rounded-lg shadow-lg p-6 w-full max-w-2xl">
+                <h2 className="text-lg font-bold mb-2">Importar Imagens (CSV/JSON)</h2>
+                <p className="text-sm text-gray-600 mb-2">CSV: SKU,MIME,BASE64 (uma por linha). Ou cole um array JSON de objetos {`{sku,mime,image_base64}`}</p>
+                <textarea className="input-field w-full" rows={10} value={bulkImagesText} onChange={e => setBulkImagesText(e.target.value)} placeholder="SKU,MIME,BASE64\n12345,image/jpeg,/9j/4AAQSkZJRg..." />
+                <div className="flex gap-2 mt-3">
+                  <button className="btn-primary" onClick={handleImportImages}>Importar</button>
+                  <button className="btn-secondary" onClick={() => setShowBulkImageModal(false)}>Fechar</button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Gerenciador de SKU Composto */}
           {showCompositeManager && selectedItem && (
             <CompositeSkuManager
@@ -1321,7 +1592,7 @@ export const Inventory = ({ user }) => {
                       />
                     </div>
                   </div>
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">
                         Categoria
@@ -1343,17 +1614,6 @@ export const Inventory = ({ user }) => {
                     </div>
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">
-                        Fornecedor
-                      </label>
-                      <input
-                        type="text"
-                        value={formData.supplier}
-                        onChange={(e) => setFormData({ ...formData, supplier: e.target.value })}
-                        className="input-field"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
                         Preço de Custo
                       </label>
                       <input
@@ -1369,15 +1629,16 @@ export const Inventory = ({ user }) => {
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">
-                        Preço de Venda
+                        Peso cúbico (kg)
                       </label>
                       <input
                         type="number"
-                        step="0.01"
+                        step="0.001"
                         min="0"
-                        value={formData.selling_price}
-                        onChange={(e) => setFormData({ ...formData, selling_price: e.target.value })}
+                        value={formData.cubic_weight}
+                        onChange={(e) => setFormData({ ...formData, cubic_weight: e.target.value })}
                         className="input-field"
+                        placeholder="Ex.: 0.250"
                       />
                     </div>
                     <div>
@@ -1565,43 +1826,67 @@ export const Inventory = ({ user }) => {
         </div>
       )}
       {activeTab === 'compostos' && (
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
-          <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Painel de SKUs Compostos e Kits</h2>
-          <p className="text-gray-600 dark:text-gray-300 mb-4">Crie e gerencie SKUs compostos (múltiplos componentes) e kits (um componente com múltiplas unidades).</p>
+        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
+          <div className="p-6 bg-gradient-to-r from-indigo-50 to-purple-50 dark:from-indigo-900/20 dark:to-purple-900/20 border-b border-gray-200 dark:border-gray-700">
+            <h2 className="text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
+              <Package className="w-6 h-6 text-indigo-600 dark:text-indigo-400" />
+              Painel de SKUs Compostos e Kits
+            </h2>
+            <p className="text-gray-600 dark:text-gray-400 mt-1 text-sm">Crie e gerencie SKUs compostos (múltiplos componentes) e kits (um componente com múltiplas unidades).</p>
+          </div>
           
-          {/* Botões para abrir formulários */}
-          <div className="flex flex-wrap gap-4 mb-6">
-            <button
-              className="btn-primary"
-              onClick={() => {
-                setShowCreateComposite(!showCreateComposite);
-                setShowCreateKit(false);
-              }}
-            >
-              {showCreateComposite ? 'Cancelar' : 'Criar SKU Composto'}
-            </button>
-            <button
-              className="btn-secondary"
-              onClick={() => {
-                setShowCreateKit(!showCreateKit);
-                setShowCreateComposite(false);
-              }}
-            >
-              {showCreateKit ? 'Cancelar' : 'Criar Kit'}
-            </button>
-            <button className="btn-secondary" onClick={() => setShowImportKitModal(true)}>
-              Importar Kits (CSV)
-            </button>
-            <button className="btn-secondary" onClick={() => setShowImportCompostoModal(true)}>
-              Importar SKUs Compostos (CSV)
-            </button>
-            <button className="btn-danger" onClick={handleCleanKits} disabled={cleaningKits}>{cleaningKits ? 'Limpando...' : 'Limpar Kits'}</button>
-            <button className="btn-danger" onClick={handleCleanCompostos} disabled={cleaningCompostos}>{cleaningCompostos ? 'Limpando...' : 'Limpar Compostos'}</button>
+          {/* Menu de ações (discreto) */}
+          <div className="px-6 py-3 flex items-center justify-between border-b border-gray-200 dark:border-gray-700">
+            <div className="flex items-center gap-2">
+              <button
+                className={`flex items-center gap-2 px-3 py-1.5 text-sm rounded-lg transition-colors ${showCreateComposite ? 'bg-indigo-100 dark:bg-indigo-900/40 text-indigo-700 dark:text-indigo-300' : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'}`}
+                onClick={() => { setShowCreateComposite(!showCreateComposite); setShowCreateKit(false); }}
+              >
+                <Plus className="w-4 h-4" />
+                {showCreateComposite ? 'Cancelar' : 'Criar Composto'}
+              </button>
+              <button
+                className={`flex items-center gap-2 px-3 py-1.5 text-sm rounded-lg transition-colors ${showCreateKit ? 'bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300' : 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'}`}
+                onClick={() => { setShowCreateKit(!showCreateKit); setShowCreateComposite(false); }}
+              >
+                <Plus className="w-4 h-4" />
+                {showCreateKit ? 'Cancelar' : 'Criar Kit'}
+              </button>
+            </div>
+            <div className="relative" ref={compostosActionsRef}>
+              <button
+                onClick={() => setShowCompostosActionsMenu(v => !v)}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
+              >
+                <Settings className="w-4 h-4" />
+                Mais ações
+                <ChevronDown className={`w-4 h-4 transition-transform ${showCompostosActionsMenu ? 'rotate-180' : ''}`} />
+              </button>
+              {showCompostosActionsMenu && (
+                <div className="absolute right-0 mt-1 w-56 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded-lg shadow-lg z-20 py-1">
+                  <div className="px-3 py-1.5 text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase">Importar</div>
+                  <button className="w-full px-3 py-2 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2 text-gray-700 dark:text-gray-200" onClick={() => { setShowImportKitModal(true); setShowCompostosActionsMenu(false); }}>
+                    <Upload className="w-4 h-4" /> Importar Kits (CSV)
+                  </button>
+                  <button className="w-full px-3 py-2 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2 text-gray-700 dark:text-gray-200" onClick={() => { setShowImportCompostoModal(true); setShowCompostosActionsMenu(false); }}>
+                    <Upload className="w-4 h-4" /> Importar Compostos (CSV)
+                  </button>
+                  <div className="border-t border-gray-200 dark:border-gray-600 my-1" />
+                  <div className="px-3 py-1.5 text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase">Limpar</div>
+                  <button className="w-full px-3 py-2 text-left text-sm hover:bg-red-50 dark:hover:bg-red-900/20 flex items-center gap-2 text-red-600 dark:text-red-400" onClick={() => { handleCleanKits(); setShowCompostosActionsMenu(false); }} disabled={cleaningKits}>
+                    <Trash2 className="w-4 h-4" /> {cleaningKits ? 'Limpando...' : 'Limpar Kits'}
+                  </button>
+                  <button className="w-full px-3 py-2 text-left text-sm hover:bg-red-50 dark:hover:bg-red-900/20 flex items-center gap-2 text-red-600 dark:text-red-400" onClick={() => { handleCleanCompostos(); setShowCompostosActionsMenu(false); }} disabled={cleaningCompostos}>
+                    <Trash2 className="w-4 h-4" /> {cleaningCompostos ? 'Limpando...' : 'Limpar Compostos'}
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Formulário de criação de SKU composto */}
           {showCreateComposite && (
-            <form onSubmit={handleCreateComposite} className="mb-6 p-4 border rounded bg-gray-50">
+            <form onSubmit={handleCreateComposite} className="mx-6 mb-6 p-5 border border-indigo-200 dark:border-indigo-800 rounded-xl bg-indigo-50/50 dark:bg-indigo-900/10">
               <div className="mb-3">
                 <label className="block text-sm font-medium text-gray-700 mb-1">SKU Principal</label>
                 <input
@@ -1666,7 +1951,7 @@ export const Inventory = ({ user }) => {
 
           {/* Formulário de criação de Kit */}
           {showCreateKit && (
-            <form onSubmit={handleCreateKit} className="mb-6 p-4 border rounded bg-gray-50">
+            <form onSubmit={handleCreateKit} className="mx-6 mb-6 p-5 border border-emerald-200 dark:border-emerald-800 rounded-xl bg-emerald-50/50 dark:bg-emerald-900/10">
               <div className="mb-3">
                 <label className="block text-sm font-medium text-gray-700 mb-1">SKU Principal</label>
                 <input
@@ -1794,88 +2079,102 @@ export const Inventory = ({ user }) => {
             </form>
           )}
 
-          {/* Listagem dos SKUs compostos */}
+          {/* Listagem em duas colunas */}
+          <div className="px-6 pb-6">
           {compositeList.length === 0 ? (
-            <div className="text-gray-500">Nenhum SKU composto ou kit cadastrado.</div>
+            <div className="flex flex-col items-center justify-center py-16 text-center">
+              <Package className="w-16 h-16 text-gray-300 dark:text-gray-600 mb-4" />
+              <p className="text-gray-500 dark:text-gray-400">Nenhum SKU composto ou kit cadastrado.</p>
+              <p className="text-sm text-gray-400 dark:text-gray-500 mt-1">Use os botões acima para criar ou importar.</p>
+            </div>
           ) : (
-            <div className="space-y-6">
-              {/* Seção SKUs Compostos */}
-              <h3 className="text-base font-bold text-purple-800 mt-8 mb-2">SKUs Compostos</h3>
-              {compositeList.filter(c => c.components.length > 1).length === 0 && (
-                <div className="mb-4 text-gray-500">Nenhum SKU composto cadastrado.</div>
-              )}
-              {compositeList.filter(c => c.components.length > 1).map((c, idx) => (
-                <div key={c.main_sku_id} className="mb-4 p-4 rounded bg-purple-50">
-                  <div className="font-bold text-purple-900 text-lg mb-1">
-                    {c.main_sku} - {c.main_title}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {/* Coluna SKUs Compostos */}
+              <section className="min-h-[200px]">
+                <h3 className="text-sm font-bold text-purple-700 dark:text-purple-400 uppercase tracking-wider mb-3 flex items-center gap-2">
+                  <Settings className="w-4 h-4" />
+                  SKUs Compostos ({compositeList.filter(c => c.components.length > 1).length})
+                </h3>
+                {compositeList.filter(c => c.components.length > 1).length === 0 ? (
+                  <div className="text-gray-500 dark:text-gray-400 text-sm py-6 bg-gray-50 dark:bg-gray-800/50 rounded-lg border border-dashed border-gray-200 dark:border-gray-700 text-center">
+                    Nenhum SKU composto cadastrado.
                   </div>
-                  <div className="mb-2 text-sm font-semibold text-gray-700">Componentes:</div>
-                  <ul className="mb-2 ml-4 list-disc text-sm">
-                    {c.components.map((comp, i) => (
-                      <li key={i}>
-                        {comp.component_sku} - {comp.component_title} (Qtd: {comp.quantity})
-                      </li>
+                ) : (
+                  <div className="space-y-3">
+                    {compositeList.filter(c => c.components.length > 1).map((c) => (
+                      <div key={c.main_sku_id} className="p-4 rounded-xl border border-purple-200 dark:border-purple-800 bg-purple-50/80 dark:bg-purple-900/20 hover:shadow-md transition-shadow">
+                        <div className="font-semibold text-purple-900 dark:text-purple-100 mb-2">
+                          {c.main_sku} — {c.main_title}
+                        </div>
+                        <ul className="mb-3 space-y-1 text-sm text-gray-600 dark:text-gray-400">
+                          {c.components.map((comp, i) => (
+                            <li key={i} className="flex items-center gap-2">
+                              <span className="w-2 h-2 rounded-full bg-purple-400" />
+                              {comp.component_sku} × {comp.quantity}
+                            </li>
+                          ))}
+                        </ul>
+                        <div className="flex gap-2">
+                          <button className="btn-secondary text-xs py-1.5" onClick={() => handleEditComposite(c)}><EditIcon className="w-3.5 h-3.5 inline mr-1" />Editar</button>
+                          <button className="btn-danger text-xs py-1.5" onClick={async () => {
+                            if (window.confirm('Excluir este SKU composto? Esta ação não pode ser desfeita.')) {
+                              try {
+                                await axios.delete(`/api/inventory/${c.main_sku_id}`);
+                                fetchCompositeList();
+                                fetchInventory();
+                                toast.success('SKU composto excluído.');
+                              } catch { toast.error('Erro ao excluir.'); }
+                            }
+                          }}><Trash2 className="w-3.5 h-3.5 inline mr-1" />Excluir</button>
+                        </div>
+                      </div>
                     ))}
-                  </ul>
-                  <button className="btn-secondary mr-2" onClick={() => handleEditComposite(c)}>Editar</button>
-                  <button
-                    className="btn-danger"
-                    onClick={async () => {
-                      if (window.confirm('Tem certeza que deseja excluir este SKU composto? Esta ação não pode ser desfeita.')) {
-                        try {
-                          await axios.delete(`/api/inventory/${c.main_sku_id}`);
-                          fetchCompositeList();
-                          fetchInventory();
-                        } catch (error) {
-                          alert('Erro ao excluir SKU composto.');
-                        }
-                      }
-                    }}
-                  >
-                    Excluir
-                  </button>
-                </div>
-              ))}
+                  </div>
+                )}
+              </section>
 
-              {/* Seção Kits */}
-              <h3 className="text-base font-bold text-green-800 mt-8 mb-2">Kits</h3>
-              {compositeList.filter(c => c.components.length === 1).length === 0 && (
-                <div className="mb-4 text-gray-500">Nenhum kit cadastrado.</div>
-              )}
-              {compositeList.filter(c => c.components.length === 1).map((c, idx) => (
-                <div key={c.main_sku_id} className="mb-4 p-4 rounded bg-green-50">
-                  <div className="font-bold text-green-900 text-lg mb-1">
-                    {c.main_sku} - {c.main_title}
+              {/* Coluna Kits */}
+              <section className="min-h-[200px]">
+                <h3 className="text-sm font-bold text-emerald-700 dark:text-emerald-400 uppercase tracking-wider mb-3 flex items-center gap-2">
+                  <Package className="w-4 h-4" />
+                  Kits ({compositeList.filter(c => c.components.length === 1).length})
+                </h3>
+                {compositeList.filter(c => c.components.length === 1).length === 0 ? (
+                  <div className="text-gray-500 dark:text-gray-400 text-sm py-6 bg-gray-50 dark:bg-gray-800/50 rounded-lg border border-dashed border-gray-200 dark:border-gray-700 text-center">
+                    Nenhum kit cadastrado.
                   </div>
-                  <div className="mb-2 text-sm font-semibold text-gray-700">Componente:</div>
-                  <ul className="mb-2 ml-4 list-disc text-sm">
-                    {c.components.map((comp, i) => (
-                      <li key={i}>
-                        {comp.component_sku} - {comp.component_title} (Qtd: {comp.quantity})
-                      </li>
+                ) : (
+                  <div className="space-y-3">
+                    {compositeList.filter(c => c.components.length === 1).map((c) => (
+                      <div key={c.main_sku_id} className="p-4 rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50/80 dark:bg-emerald-900/20 hover:shadow-md transition-shadow">
+                        <div className="font-semibold text-emerald-900 dark:text-emerald-100 mb-2">
+                          {c.main_sku} — {c.main_title}
+                        </div>
+                        <div className="mb-3 text-sm text-gray-600 dark:text-gray-400">
+                          <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block mr-2 align-middle" />
+                          {c.components[0].component_sku} × {c.components[0].quantity}
+                        </div>
+                        <div className="flex gap-2">
+                          <button className="btn-secondary text-xs py-1.5" onClick={() => handleEditKit(c)}><EditIcon className="w-3.5 h-3.5 inline mr-1" />Editar</button>
+                          <button className="btn-danger text-xs py-1.5" onClick={async () => {
+                            if (window.confirm('Excluir este kit? Esta ação não pode ser desfeita.')) {
+                              try {
+                                await axios.delete(`/api/inventory/${c.main_sku_id}`);
+                                fetchCompositeList();
+                                fetchInventory();
+                                toast.success('Kit excluído.');
+                              } catch { toast.error('Erro ao excluir.'); }
+                            }
+                          }}><Trash2 className="w-3.5 h-3.5 inline mr-1" />Excluir</button>
+                        </div>
+                      </div>
                     ))}
-                  </ul>
-                  <button className="btn-secondary mr-2" onClick={() => handleEditKit(c)}>Editar</button>
-                  <button
-                    className="btn-danger"
-                    onClick={async () => {
-                      if (window.confirm('Tem certeza que deseja excluir este kit? Esta ação não pode ser desfeita.')) {
-                        try {
-                          await axios.delete(`/api/inventory/${c.main_sku_id}`);
-                          fetchCompositeList();
-                          fetchInventory();
-                        } catch (error) {
-                          alert('Erro ao excluir kit.');
-                        }
-                      }
-                    }}
-                  >
-                    Excluir
-                  </button>
-                </div>
-              ))}
+                  </div>
+                )}
+              </section>
             </div>
           )}
+          </div>
         </div>
       )}
       {activeTab === 'movimentacao' && (
@@ -1904,7 +2203,8 @@ export const Inventory = ({ user }) => {
               await axios.post(`/api/inventory/${item.id}/movement`, {
                 movement_type,
                 quantity: Number(movementForm.quantity),
-                user_id: user.id // Adicionar ID do usuário logado
+                user_id: user.id, // Adicionar ID do usuário logado
+                accountId: activeAccountFilter !== 'all' ? activeAccountFilter : null
               });
               setMovementForm({ skuId: '', type: 'entrada', quantity: 1 });
               fetchMovements();
@@ -1951,6 +2251,21 @@ export const Inventory = ({ user }) => {
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Quantidade</label>
               <input type="number" min="1" className="input-field w-24 dark:bg-gray-700 dark:text-white dark:border-gray-600" required value={movementForm.quantity} onChange={e => setMovementForm(f => ({ ...f, quantity: e.target.value }))} />
             </div>
+            {blingAccounts.length > 0 && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Conta</label>
+                <select
+                  className="input-field dark:bg-gray-700 dark:text-white dark:border-gray-600"
+                  value={activeAccountFilter}
+                  onChange={e => { setActiveAccountFilter(e.target.value); setMovementsPage(1); }}
+                >
+                  <option value="all">Todas as contas</option>
+                  {blingAccounts.map(acc => (
+                    <option key={acc.id} value={String(acc.id)}>{acc.name}</option>
+                  ))}
+                </select>
+              </div>
+            )}
             <button type="submit" className="btn-primary" disabled={movementLoading}>{movementLoading ? 'Registrando...' : 'Registrar'}</button>
             <div className="w-80 ml-auto">
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Pesquisar</label>
@@ -1977,17 +2292,18 @@ export const Inventory = ({ user }) => {
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Item</th>
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Tipo</th>
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Quantidade</th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Conta</th>
                   <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Usuário</th>
                 </tr>
               </thead>
               <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                 {movementsLoading ? (
                   <tr>
-                    <td className="px-4 py-2 dark:text-white text-center" colSpan={6}>Carregando...</td>
+                    <td className="px-4 py-2 dark:text-white text-center" colSpan={7}>Carregando...</td>
                   </tr>
                 ) : movements.length === 0 ? (
                   <tr>
-                    <td className="px-4 py-2 dark:text-white text-center" colSpan={6}>
+                    <td className="px-4 py-2 dark:text-white text-center" colSpan={7}>
                       {movementsSearchTerm ? 'Nenhuma movimentação encontrada para a pesquisa.' : 'Nenhuma movimentação registrada.'}
                     </td>
                   </tr>
@@ -2013,6 +2329,7 @@ export const Inventory = ({ user }) => {
                       <td className="px-4 py-2 dark:text-white">{m.item_title}</td>
                       <td className="px-4 py-2 dark:text-white">{m.movement_type === 'in' ? 'Entrada' : m.movement_type === 'out' ? 'Saída' : 'Ajuste'}</td>
                       <td className="px-4 py-2 dark:text-white">{m.quantity}</td>
+                      <td className="px-4 py-2 dark:text-white">{m.account_name || getAccountLabel(m.account_id)}</td>
                       <td className="px-4 py-2 dark:text-white">{m.user_name || 'Sistema'}</td>
                     </tr>
                   ))
@@ -2071,51 +2388,83 @@ export const Inventory = ({ user }) => {
         </div>
       )}
       {activeTab === 'historico-aglutinados' && (
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
+        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg border border-gray-200 dark:border-gray-700 p-6">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Histórico de Aglutinados</h2>
           {loadingAglutinados ? (
-            <div className="text-center text-gray-500 dark:text-gray-400">Carregando...</div>
+            <div className="text-center py-12 text-gray-500 dark:text-gray-400">Carregando...</div>
           ) : aglutinados.length === 0 ? (
-            <div className="text-center text-gray-500 dark:text-gray-400">Nenhum aglutinado salvo.</div>
+            <div className="text-center py-12 text-gray-500 dark:text-gray-400">Nenhum aglutinado salvo.</div>
           ) : (
-            <div className="overflow-x-auto">
-                          <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-              <thead className="bg-gray-50 dark:bg-gray-700">
-                <tr>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Data</th>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Marketplaces</th>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Ações</th>
-                </tr>
-              </thead>
-              <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                  {aglutinados.map(a => (
-                    <tr key={a.id}>
-                      <td className="px-4 py-2 dark:text-white">{new Date(a.data_criacao).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })}</td>
-                      <td className="px-4 py-2 dark:text-white">{a.marketplaces}</td>
-                      <td className="px-4 py-2">
-                        <button className="btn-secondary mr-2" onClick={() => handleVisualizarAglutinado(a.id)}>Visualizar</button>
-                        <button className="btn-primary" onClick={async () => {
-                          const res = await axios.get(`/api/aglutinados/${a.id}`);
-                          handleImprimirAglutinado(res.data.conteudo_html);
-                        }}>Imprimir</button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-          {/* Modal de visualização do aglutinado */}
-          {visualizarAglutinado && (
-            <div className="aglutinado-modal-bg">
-              <div className="aglutinado-modal">
-                <button className="close-btn" onClick={() => setVisualizarAglutinado(null)} title="Fechar">×</button>
-                <div dangerouslySetInnerHTML={{ __html: visualizarAglutinado.conteudo_html }} />
+            <>
+              <div className="space-y-3">
+                {aglutinados.slice((aglutinadosPage - 1) * aglutinadosPerPage, aglutinadosPage * aglutinadosPerPage).map(a => {
+                  const dataExibir = a.data_criacao_br || (() => {
+                    try {
+                      let d = a.data_criacao;
+                      if (typeof d === 'string' && !d.endsWith('Z') && !d.includes('+') && !d.includes('-', 10)) d = d.replace(' ', 'T') + 'Z';
+                      return new Date(d).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+                    } catch { return a.data_criacao || '-'; }
+                  })();
+                  const mks = (a.marketplaces || '').split(',').map(s => s.trim()).filter(Boolean);
+                  return (
+                    <div key={a.id} className="flex items-center justify-between gap-4 p-4 rounded-xl border border-gray-200 dark:border-gray-600 bg-gray-50/50 dark:bg-gray-700/30 hover:bg-gray-100/50 dark:hover:bg-gray-700/50">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap gap-2 mb-2">
+                          {mks.map((mk, i) => (
+                            <span key={i} className="px-3 py-1 rounded-lg text-sm font-semibold bg-blue-500 dark:bg-blue-600 text-white shadow-sm">{mk}</span>
+                          ))}
+                        </div>
+                        <div className="text-xs text-gray-500 dark:text-gray-400">{dataExibir}</div>
+                      </div>
+                      <div className="relative flex-shrink-0">
+                        <button onClick={() => setAglutinadoMenuOpen(aglutinadoMenuOpen === a.id ? null : a.id)} className="p-2 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-600 dark:text-gray-400">
+                          <span className="sr-only">Ações</span>
+                          <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1.5" /><circle cx="12" cy="6" r="1.5" /><circle cx="12" cy="18" r="1.5" /></svg>
+                        </button>
+                        {aglutinadoMenuOpen === a.id && (
+                          <>
+                            <div className="fixed inset-0 z-10" onClick={() => setAglutinadoMenuOpen(null)} />
+                            <div className="absolute right-0 mt-1 w-40 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded-lg shadow-lg z-20 py-1">
+                              <button className="w-full px-3 py-2 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2 text-gray-700 dark:text-gray-200" onClick={() => { handleVisualizarAglutinado(a.id); setAglutinadoMenuOpen(null); }}>Visualizar</button>
+                              <button className="w-full px-3 py-2 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2 text-gray-700 dark:text-gray-200" onClick={async () => {
+                                const res = await axios.get(`/api/aglutinados/${a.id}`);
+                                handleImprimirAglutinado(res.data.conteudo_html);
+                                setAglutinadoMenuOpen(null);
+                              }}>Imprimir</button>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
-            </div>
+              <div className="flex flex-wrap items-center justify-between gap-3 mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
+                <span className="text-sm text-gray-600 dark:text-gray-400">
+                  Exibindo {(aglutinadosPage - 1) * aglutinadosPerPage + 1}–{Math.min(aglutinadosPage * aglutinadosPerPage, aglutinados.length)} de {aglutinados.length}
+                </span>
+                <div className="flex items-center gap-2">
+                  <button className="px-3 py-1.5 rounded border text-sm disabled:opacity-50" disabled={aglutinadosPage === 1} onClick={() => setAglutinadosPage(p => Math.max(1, p - 1))}>Anterior</button>
+                  <span className="text-sm text-gray-600 dark:text-gray-400">Página {aglutinadosPage} de {Math.max(1, Math.ceil(aglutinados.length / aglutinadosPerPage))}</span>
+                  <button className="px-3 py-1.5 rounded border text-sm disabled:opacity-50" disabled={aglutinadosPage >= Math.ceil(aglutinados.length / aglutinadosPerPage)} onClick={() => setAglutinadosPage(p => Math.min(Math.ceil(aglutinados.length / aglutinadosPerPage), p + 1))}>Próxima</button>
+                  <select value={aglutinadosPerPage} onChange={e => { setAglutinadosPerPage(Number(e.target.value)); setAglutinadosPage(1); }} className="ml-2 border rounded text-sm px-2 py-1.5 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200">
+                    {[10, 15, 25, 50].map(n => <option key={n} value={n}>{n} por página</option>)}
+                  </select>
+                </div>
+              </div>
+            </>
           )}
         </div>
       )}
+      {visualizarAglutinado && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60] p-4" onClick={() => setVisualizarAglutinado(null)}>
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-xl w-full max-w-4xl max-h-[90vh] overflow-auto p-6 relative" onClick={e => e.stopPropagation()}>
+            <button className="absolute top-4 right-4 p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700" onClick={() => setVisualizarAglutinado(null)}>×</button>
+            <div dangerouslySetInnerHTML={{ __html: visualizarAglutinado.conteudo_html }} />
+          </div>
+        </div>
+      )}
+
       {showImportKitModal && <ImportKitModal />}
       {showImportCompostoModal && <ImportCompostoModal />}
     </div>
