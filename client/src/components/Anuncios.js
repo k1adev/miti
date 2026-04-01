@@ -1,13 +1,14 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   Search, Upload, RefreshCw, Link2, Unlink, Globe, ToggleLeft, ToggleRight,
   CheckCircle, AlertTriangle, Pause, Play, ExternalLink, Star, Award,
-  Download, Send, X,   ChevronDown, ChevronRight, ChevronLeft, Edit3, Trash2, Copy, Package, Plus, MoreVertical
+  Download, Send, X, ChevronDown, ChevronUp, ChevronRight, ChevronLeft, Edit3, Trash2, Copy, Package, Plus, MoreVertical, Image, Ruler
 } from 'lucide-react';
 import axios from 'axios';
 import { useDebounce } from '../hooks/useDebounce';
 import { useToast } from './Toast';
+import { ModelVariationAccordionRow } from './ModelVariationAccordionRow';
 
 const LISTING_TYPE_MAP = {
   gold_pro: { label: 'Premium', color: 'bg-orange-100 text-orange-700', icon: Star },
@@ -20,6 +21,190 @@ const TEMPLATE_STATUS = {
   published: { label: 'Publicado', cls: 'bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-400' },
   error: { label: 'Erro', cls: 'bg-red-100 dark:bg-red-900/40 text-red-600 dark:text-red-400' },
 };
+
+/** Atributos que o servidor não envia na publicação ML — não marcar como pendência */
+const ML_ATTR_IDS_IGNORE_VALIDATE = ['ITEM_CONDITION'];
+
+const DEFAULT_PACKAGE_FORM = () => ({
+  has_factory_packaging: true,
+  width_cm: '',
+  height_cm: '',
+  depth_cm: '',
+  weight_kg: '',
+  preset_id: null,
+});
+
+function parsePackageMeasuresFromModel(row) {
+  try {
+    const raw = row?.package_measures;
+    if (raw == null || raw === '') return DEFAULT_PACKAGE_FORM();
+    const o = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!o || typeof o !== 'object') return DEFAULT_PACKAGE_FORM();
+    return {
+      ...DEFAULT_PACKAGE_FORM(),
+      has_factory_packaging: o.has_factory_packaging !== false,
+      width_cm: o.width_cm != null && o.width_cm !== '' ? String(o.width_cm) : '',
+      height_cm: o.height_cm != null && o.height_cm !== '' ? String(o.height_cm) : '',
+      depth_cm: o.depth_cm != null && o.depth_cm !== '' ? String(o.depth_cm) : '',
+      weight_kg: o.weight_kg != null && o.weight_kg !== '' ? String(o.weight_kg) : '',
+      preset_id: o.preset_id != null ? o.preset_id : null,
+    };
+  } catch {
+    return DEFAULT_PACKAGE_FORM();
+  }
+}
+
+function serializePackageMeasuresForApi(pkg) {
+  if (!pkg) return null;
+  if (pkg.has_factory_packaging === false) return { has_factory_packaging: false };
+  const w = parseFloat(pkg.width_cm);
+  const h = parseFloat(pkg.height_cm);
+  const d = parseFloat(pkg.depth_cm);
+  const kg = parseFloat(pkg.weight_kg);
+  const o = { has_factory_packaging: true, preset_id: pkg.preset_id != null ? pkg.preset_id : null };
+  if (Number.isFinite(w) && w > 0) o.width_cm = w;
+  if (Number.isFinite(h) && h > 0) o.height_cm = h;
+  if (Number.isFinite(d) && d > 0) o.depth_cm = d;
+  if (Number.isFinite(kg) && kg > 0) o.weight_kg = kg;
+  return o;
+}
+
+function mlAttrValueEmpty(attr) {
+  const v = (attr.value_name ?? attr.value_id ?? '').toString().trim();
+  return !v;
+}
+
+function mlAttrTags(def) {
+  const t = def?.tags || {};
+  return {
+    required: t.required === true,
+    catalogRequired: t.catalog_required === true,
+    hidden: t.hidden === true,
+  };
+}
+
+function stripAccents(s) {
+  return String(s || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+/** Filtro da grelha de atributos: nome/ID + exemplo do ML + sinónimos (ex.: «frequência» → MAX_ROTATION_SPEED). */
+function modelAttrSearchMatchesRow(r, qRaw) {
+  const raw = String(qRaw || '').trim();
+  if (!raw) return true;
+  const q = stripAccents(raw.toLowerCase());
+  const hay = stripAccents(
+    [r.attr?.id, r.displayName, r.def?.name, r.def?.example].filter(Boolean).join(' ').toLowerCase()
+  );
+  if (hay.includes(q)) return true;
+  const id = String(r.attr?.id || '').toUpperCase();
+  /* No anúncio público o ML às vezes agrupa rotação (rpm) sob rótulos parecidos com «frequência». */
+  if (/(frequ|rotac|rotar|rpm|rota(ç|c))/i.test(raw)) {
+    if (/FREQUENCY|MAX_ROTATION|ROTATION_SPEED|POWER_MAX_ROTATION/i.test(id)) return true;
+    if (/(rpm|hz|rota(ç|c)|velocidade)/i.test(hay)) return true;
+  }
+  return false;
+}
+
+/** Atributos de variação filtrados por “só cor” ou “só voltagem” (IDs/nomes comuns no ML Brasil). */
+function filterVariationAttrsByKind(allAxisAttrs, kind) {
+  if (!kind || kind === 'full' || kind === 'none') return allAxisAttrs;
+  if (kind === 'color') {
+    const hit = allAxisAttrs.filter((a) => /COLOR|COR|PAINT|FINISH/i.test(a.id) || /cor|acabamento/i.test(a.name || ''));
+    return hit.length ? hit : allAxisAttrs;
+  }
+  if (kind === 'voltage') {
+    const hit = allAxisAttrs.filter((a) => /VOLT|VOLTAG|TENS|ENERG|POWER|WATT/i.test(a.id) || /volt|voltag|tensão|watts/i.test(a.name || ''));
+    return hit.length ? hit : allAxisAttrs;
+  }
+  return allAxisAttrs;
+}
+
+/** Ao reabrir um modelo: inferir se era só voltagem/cor para não resetar o filtro de eixos. */
+function inferVariationAxisChoiceFromData(vars) {
+  const combos = vars.flatMap((v) => v.attribute_combinations || []);
+  const ids = new Set(combos.map((c) => c.id).filter(Boolean));
+  if (ids.size === 0) return 'full';
+  if (ids.size === 1) {
+    const id = [...ids][0];
+    if (/VOLT|VOLTAG|TENS/i.test(id)) return 'voltage';
+    if (/COLOR|COR|PAINT|FINISH/i.test(id)) return 'color';
+  }
+  return 'full';
+}
+
+/** Cor (ou primeiro eixo) como grupo; voltagem (e demais) como filhos — espelha o fluxo do site ML. */
+function primarySecondaryVariationAttrs(axes) {
+  if (!axes || axes.length === 0) return { primary: [], secondary: [] };
+  if (axes.length === 1) return { primary: axes, secondary: [] };
+  const color = axes.find((a) => /COLOR|COR|PAINT|FINISH/i.test(a.id || '') || /cor|estrutura|acabamento|cúpula/i.test(a.name || ''));
+  const volt = axes.find((a) => /VOLT|VOLTAG|TENS/i.test(a.id || '') || /volt|voltag|tensão/i.test(a.name || ''));
+  if (color && volt) {
+    const rest = axes.filter((a) => a.id !== color.id && a.id !== volt.id);
+    return { primary: [color], secondary: [volt, ...rest] };
+  }
+  return { primary: [axes[0]], secondary: axes.slice(1) };
+}
+
+function buildCombosFromSplit(split, sample, mode) {
+  const order = [...split.primary, ...split.secondary];
+  if (order.length === 0) return [];
+  return order.map((a) => {
+    const isSec = split.secondary.some((s) => s.id === a.id);
+    if (mode === 'allEmpty') return { id: a.id, name: a.name, value_id: null, value_name: '' };
+    if (mode === 'cloneSecondary' && isSec) return { id: a.id, name: a.name, value_id: null, value_name: '' };
+    const c = (sample.attribute_combinations || []).find((x) => x.id === a.id);
+    return { id: a.id, name: a.name, value_id: c?.value_id ?? null, value_name: c?.value_name ?? '' };
+  });
+}
+
+function buildVariationGroupMeta(variations, primaryAttrs) {
+  if (!primaryAttrs.length) {
+    return [{ pk: '_all', label: 'Todas', indices: variations.map((_, vi) => vi) }];
+  }
+  const map = new Map();
+  variations.forEach((v, vi) => {
+    const combos = v.attribute_combinations || [];
+    const pk = primaryAttrs.map((a) => {
+      const c = combos.find((x) => x.id === a.id);
+      return `${a.id}:${c?.value_id ?? ''}:${String(c?.value_name ?? '').trim()}`;
+    }).join('||');
+    const label = primaryAttrs.map((a) => {
+      const c = combos.find((x) => x.id === a.id);
+      return String(c?.value_name || c?.value_id || '—').trim();
+    }).join(' / ');
+    if (!map.has(pk)) map.set(pk, { pk, label, indices: [] });
+    map.get(pk).indices.push(vi);
+  });
+  return [...map.values()];
+}
+
+/** Valida modelo antes de salvar (variações e termos de venda). */
+function validateModelEditModal(m) {
+  const errs = [];
+  const vars = m._variations || [];
+  const terms = (m._sale_terms || []).filter((t) => t && String(t.id || '').trim());
+
+  for (let i = 0; i < terms.length; i++) {
+    const t = terms[i];
+    const hasVal = String(t.value_name || '').trim() || String(t.value_id || '').trim();
+    if (!hasVal) errs.push(`Termo "${t.id}": preencha valor ou value_id`);
+  }
+
+  for (let i = 0; i < vars.length; i++) {
+    const v = vars[i];
+    const combos = v.attribute_combinations || [];
+    if (combos.length === 0) {
+      errs.push(`Variação ${i + 1}: sem combinação de atributos`);
+      continue;
+    }
+    const bad = combos.some((ac) => !String(ac.value_name || '').trim() && !String(ac.value_id || '').trim());
+    if (bad) errs.push(`Variação ${i + 1}: preencha valor em cada atributo da combinação`);
+  }
+
+  return errs;
+}
 
 export const Anuncios = ({ user }) => {
   const toast = useToast();
@@ -66,6 +251,11 @@ export const Anuncios = ({ user }) => {
   const debouncedModelSearch = useDebounce(modelSearch, 400);
   const [selectedModels, setSelectedModels] = useState(new Set());
   const [modelEditModal, setModelEditModal] = useState(null);
+  const [packagePresets, setPackagePresets] = useState([]);
+  const [packagePresetsModalOpen, setPackagePresetsModalOpen] = useState(false);
+  const [presetNewDraft, setPresetNewDraft] = useState({ name: '', width_cm: '', height_cm: '', depth_cm: '', weight_kg: '' });
+  const [presetEditDraft, setPresetEditDraft] = useState(null);
+  const [presetSaving, setPresetSaving] = useState(false);
   const [modelPublishModal, setModelPublishModal] = useState(null);
   const [modelPublishing, setModelPublishing] = useState(false);
   const [bulkPublishModal, setBulkPublishModal] = useState(null);
@@ -76,6 +266,27 @@ export const Anuncios = ({ user }) => {
   const [expandedModels, setExpandedModels] = useState(new Set());
   const [pushingModel, setPushingModel] = useState({});
   const [togglingListing, setTogglingListing] = useState({});
+  const [modelCategorySchema, setModelCategorySchema] = useState(null);
+  const [modelCategorySchemaLoading, setModelCategorySchemaLoading] = useState(false);
+  const [modelAttrFilter, setModelAttrFilter] = useState('all');
+  const [modelAttrSearch, setModelAttrSearch] = useState('');
+  const [modelPicUrlDraft, setModelPicUrlDraft] = useState('');
+  const [modelPicUploading, setModelPicUploading] = useState(false);
+  const [modelShowPicUrlInput, setModelShowPicUrlInput] = useState(false);
+  const [modelPicEditIndex, setModelPicEditIndex] = useState(null);
+  const [modelVariationAxisChoice, setModelVariationAxisChoice] = useState(null);
+  /** Índices de variação expandidos no modal (acordeão). */
+  const [modelVariationExpanded, setModelVariationExpanded] = useState(() => new Set([0]));
+  const modelPictureFileInputRef = useRef(null);
+
+  const loadPackagePresets = useCallback(async () => {
+    try {
+      const r = await axios.get('/api/package-presets');
+      setPackagePresets(r.data.presets || []);
+    } catch {
+      setPackagePresets([]);
+    }
+  }, []);
 
   useEffect(() => {
     (async () => { try { const r = await axios.get('/api/ml/accounts'); setMlAccounts(r.data?.accounts || []); } catch { setMlAccounts([]); } })();
@@ -89,6 +300,165 @@ export const Anuncios = ({ user }) => {
     document.addEventListener('click', close);
     return () => document.removeEventListener('click', close);
   }, [openActionMenu]);
+
+  useEffect(() => {
+    if (!modelEditModal?.category_id) {
+      setModelCategorySchema(null);
+      setModelCategorySchemaLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setModelCategorySchemaLoading(true);
+    setModelCategorySchema(null);
+    (async () => {
+      try {
+        const r = await axios.get(`/api/ml/categories/${encodeURIComponent(modelEditModal.category_id)}/attributes`);
+        if (!cancelled) setModelCategorySchema(r.data);
+      } catch {
+        if (!cancelled) setModelCategorySchema(null);
+      } finally {
+        if (!cancelled) setModelCategorySchemaLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [modelEditModal?.category_id]);
+
+  useEffect(() => {
+    if (!modelEditModal) return;
+    setModelAttrFilter('all');
+    setModelAttrSearch('');
+    loadPackagePresets();
+  }, [modelEditModal?.id, modelEditModal?.category_id, loadPackagePresets]);
+
+  useEffect(() => {
+    if (!packagePresetsModalOpen) return;
+    loadPackagePresets();
+    setPresetNewDraft({ name: '', width_cm: '', height_cm: '', depth_cm: '', weight_kg: '' });
+    setPresetEditDraft(null);
+  }, [packagePresetsModalOpen, loadPackagePresets]);
+
+  useEffect(() => {
+    if (!modelEditModal) {
+      setModelPicUrlDraft('');
+      setModelShowPicUrlInput(false);
+      setModelPicEditIndex(null);
+      setModelVariationAxisChoice(null);
+      setModelVariationExpanded(new Set([0]));
+      return;
+    }
+    const vars = modelEditModal._variations || [];
+    if (vars.length > 0) setModelVariationAxisChoice(inferVariationAxisChoiceFromData(vars));
+    else setModelVariationAxisChoice(null);
+  }, [modelEditModal?.id]);
+
+  useEffect(() => {
+    if (!modelEditModal) return;
+    const n = (modelEditModal._variations || []).length;
+    if (n === 0) return;
+    setModelVariationExpanded((prev) => {
+      const valid = [...prev].filter((i) => i < n && i >= 0);
+      if (valid.length === 0) return new Set([0]);
+      return new Set(valid);
+    });
+  }, [modelEditModal?.id, modelEditModal?._variations?.length]);
+
+  const modelVariationAxisAttrs = useMemo(() => {
+    const arr = Array.isArray(modelCategorySchema) ? modelCategorySchema : [];
+    return arr.filter((a) => a.tags?.allow_variations);
+  }, [modelCategorySchema]);
+
+  const modelVariationAxisAttrsFiltered = useMemo(() => {
+    return filterVariationAttrsByKind(modelVariationAxisAttrs, modelVariationAxisChoice);
+  }, [modelVariationAxisAttrs, modelVariationAxisChoice]);
+
+  const modelShowVariationAxisPicker = useMemo(() => {
+    if (!modelEditModal) return false;
+    return modelVariationAxisAttrs.length > 0 && (modelEditModal._variations || []).length === 0 && modelVariationAxisChoice === null;
+  }, [modelEditModal?.id, modelEditModal?._variations?.length, modelVariationAxisAttrs.length, modelVariationAxisChoice]);
+
+  const modelShowVariationEditor = useMemo(() => {
+    if (!modelEditModal) return false;
+    if (modelShowVariationAxisPicker) return false;
+    if (modelVariationAxisChoice === 'none') return false;
+    const vs = modelEditModal._variations || [];
+    if (vs.length > 0) return true;
+    if (['color', 'voltage', 'full'].includes(modelVariationAxisChoice)) return true;
+    if (modelVariationAxisChoice === null && modelVariationAxisAttrs.length === 0) return true;
+    return false;
+  }, [modelEditModal?.id, modelEditModal?._variations?.length, modelShowVariationAxisPicker, modelVariationAxisChoice, modelVariationAxisAttrs.length]);
+
+  const variationAxesUi = useMemo(() => {
+    const axesRaw = modelVariationAxisAttrsFiltered.length > 0 ? modelVariationAxisAttrsFiltered : modelVariationAxisAttrs;
+    return axesRaw;
+  }, [modelVariationAxisAttrsFiltered, modelVariationAxisAttrs]);
+
+  const variationNestedSplit = useMemo(() => primarySecondaryVariationAttrs(variationAxesUi), [variationAxesUi]);
+
+  const useNestedVariationUi = variationNestedSplit.secondary.length > 0;
+
+  const variationGroups = useMemo(() => {
+    if (!modelEditModal) return [];
+    const vars = modelEditModal._variations || [];
+    if (!variationNestedSplit.secondary.length) return [];
+    return buildVariationGroupMeta(vars, variationNestedSplit.primary);
+  }, [modelEditModal?._variations, variationNestedSplit, modelEditModal]);
+
+  const modelAttrAnalysis = useMemo(() => {
+    if (!modelEditModal?._attributes?.length) {
+      return { rows: [], missingCount: 0 };
+    }
+    const attrs = modelEditModal._attributes;
+    const schemaArr = Array.isArray(modelCategorySchema) ? modelCategorySchema : [];
+    const schemaById = {};
+    for (const d of schemaArr) {
+      if (d.id) schemaById[d.id] = d;
+    }
+    let missingCount = 0;
+    const rows = attrs.map((attr, index) => {
+      const def = schemaById[attr.id];
+      const { required, catalogRequired, hidden } = mlAttrTags(def);
+      const ignored = ML_ATTR_IDS_IGNORE_VALIDATE.includes(attr.id);
+      const mlMandatory = !ignored && !hidden && (required || catalogRequired);
+      const empty = mlAttrValueEmpty(attr);
+      const issue = mlMandatory && empty;
+      if (issue) missingCount++;
+      const priority = issue ? 0 : mlMandatory ? 1 : 2;
+      const displayName = attr.name || def?.name || attr.id;
+      return {
+        attr,
+        index,
+        def,
+        required,
+        catalogRequired,
+        ignored,
+        mlMandatory,
+        empty,
+        issue,
+        priority,
+        displayName,
+      };
+    });
+    rows.sort((a, b) => a.priority - b.priority || a.displayName.localeCompare(b.displayName, 'pt-BR'));
+    return { rows, missingCount };
+  }, [modelEditModal, modelCategorySchema]);
+
+  const modelAttrFilteredRows = useMemo(() => {
+    return modelAttrAnalysis.rows.filter((r) => {
+      if (modelAttrFilter === 'issues' && !r.issue) return false;
+      return modelAttrSearchMatchesRow(r, modelAttrSearch);
+    });
+  }, [modelAttrAnalysis.rows, modelAttrFilter, modelAttrSearch]);
+
+  /** Eixos ML (allow_variations) que batem com a busca — não entram na grelha do item. */
+  const modelVariationAxesMatchingSearch = useMemo(() => {
+    const raw = modelAttrSearch.trim();
+    if (!raw) return [];
+    const axes = modelVariationAxisAttrs || [];
+    return axes.filter((a) => modelAttrSearchMatchesRow(
+      { attr: { id: a.id }, displayName: a.name || a.id, def: a },
+      raw
+    ));
+  }, [modelVariationAxisAttrs, modelAttrSearch]);
 
   const fetchItems = useCallback(async () => {
     setLoading(true);
@@ -385,8 +755,115 @@ export const Anuncios = ({ user }) => {
     }
   };
 
+  const handleModelPictureFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setModelPicUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const r = await axios.post('/api/ad-models/upload-picture', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      const raw = r.data?.url || r.data?.path;
+      if (!raw) {
+        toast.error('Resposta inválida do servidor');
+        return;
+      }
+      const abs = raw.startsWith('http') ? raw : `${window.location.origin}${raw.startsWith('/') ? '' : '/'}${raw}`;
+      setModelEditModal((p) => ({ ...p, _pictures: [...(p._pictures || []), { id: `pic-${Date.now()}`, source: abs }] }));
+      toast.success('Imagem enviada');
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Falha no upload da imagem');
+    } finally {
+      setModelPicUploading(false);
+      e.target.value = '';
+    }
+  };
+
+  const handlePresetModalAdd = async () => {
+    const d = presetNewDraft;
+    const n = (d.name || '').trim();
+    const w = parseFloat(d.width_cm);
+    const h = parseFloat(d.height_cm);
+    const dep = parseFloat(d.depth_cm);
+    const kg = parseFloat(d.weight_kg);
+    if (!n) {
+      toast.error('Informe o nome da caixa.');
+      return;
+    }
+    if (![w, h, dep, kg].every((x) => Number.isFinite(x) && x > 0)) {
+      toast.error('Preencha largura, altura, profundidade (cm) e peso (kg) com valores válidos.');
+      return;
+    }
+    setPresetSaving(true);
+    try {
+      await axios.post('/api/package-presets', { name: n, width_cm: w, height_cm: h, depth_cm: dep, weight_kg: kg });
+      toast.success('Caixa adicionada.');
+      setPresetNewDraft({ name: '', width_cm: '', height_cm: '', depth_cm: '', weight_kg: '' });
+      await loadPackagePresets();
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Erro ao adicionar');
+    } finally {
+      setPresetSaving(false);
+    }
+  };
+
+  const handlePresetModalSaveEdit = async () => {
+    if (!presetEditDraft?.id) return;
+    const n = (presetEditDraft.name || '').trim();
+    const w = parseFloat(presetEditDraft.width_cm);
+    const h = parseFloat(presetEditDraft.height_cm);
+    const dep = parseFloat(presetEditDraft.depth_cm);
+    const kg = parseFloat(presetEditDraft.weight_kg);
+    if (!n) {
+      toast.error('Informe o nome.');
+      return;
+    }
+    if (![w, h, dep, kg].every((x) => Number.isFinite(x) && x > 0)) {
+      toast.error('Medidas inválidas.');
+      return;
+    }
+    setPresetSaving(true);
+    try {
+      await axios.put(`/api/package-presets/${presetEditDraft.id}`, { name: n, width_cm: w, height_cm: h, depth_cm: dep, weight_kg: kg });
+      toast.success('Caixa atualizada.');
+      setPresetEditDraft(null);
+      await loadPackagePresets();
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Erro ao atualizar');
+    } finally {
+      setPresetSaving(false);
+    }
+  };
+
+  const handlePresetModalDelete = async (id) => {
+    if (!window.confirm('Excluir esta caixa salva? Modelos que a referenciarem deixarão de encontrar o preset no seletor.')) return;
+    setPresetSaving(true);
+    try {
+      await axios.delete(`/api/package-presets/${id}`);
+      toast.success('Caixa removida.');
+      if (presetEditDraft?.id === id) setPresetEditDraft(null);
+      await loadPackagePresets();
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Erro ao excluir');
+    } finally {
+      setPresetSaving(false);
+    }
+  };
+
   const handleModelSave = async () => {
     if (!modelEditModal) return;
+    const validationErrors = validateModelEditModal(modelEditModal);
+    if (validationErrors.length) {
+      const msg = validationErrors.slice(0, 4).join(' • ');
+      toast.error(msg + (validationErrors.length > 4 ? ` (+${validationErrors.length - 4})` : ''));
+      return;
+    }
+    const pics = modelEditModal._pictures || [];
+    if (pics.length === 0) {
+      if (!window.confirm('Nenhuma imagem neste modelo. O Mercado Livre exige pelo menos uma foto para publicar. Deseja salvar mesmo assim?')) return;
+    }
     try {
       const payload = {
         sku: modelEditModal.sku, ean: modelEditModal.ean, title: modelEditModal.title,
@@ -399,9 +876,11 @@ export const Anuncios = ({ user }) => {
         video_id: modelEditModal.video_id || null, inventory_id: modelEditModal.inventory_id || null,
       };
       if (modelEditModal._attributes) payload.attributes = modelEditModal._attributes;
+      if (modelEditModal._pictures) payload.pictures = modelEditModal._pictures;
       if (modelEditModal._variations) payload.variations = modelEditModal._variations;
       if (modelEditModal._shipping) payload.shipping = modelEditModal._shipping;
       if (modelEditModal._sale_terms) payload.sale_terms = modelEditModal._sale_terms;
+      payload.package_measures = serializePackageMeasuresForApi(modelEditModal._package);
 
       if (modelEditModal.id) {
         await axios.put(`/api/ad-models/${modelEditModal.id}`, payload);
@@ -1004,9 +1483,13 @@ export const Anuncios = ({ user }) => {
                 className="px-3 py-2 bg-purple-600 hover:bg-purple-700 text-white text-sm rounded-lg transition-colors flex items-center gap-1.5">
                 <Download className="w-4 h-4" /> Importar de Anúncio
                             </button>
-              <button onClick={() => setModelEditModal({ title: '', sku: '', ean: '', price: 0, available_quantity: 1, listing_type_id: 'gold_special', condition: 'new', buying_mode: 'buy_it_now', currency_id: 'BRL', category_id: '', description: '', video_id: '', _attributes: [], _variations: [], _shipping: null, _sale_terms: [], _pictures: [] })}
+              <button onClick={() => setModelEditModal({ title: '', sku: '', ean: '', price: 0, available_quantity: 1, listing_type_id: 'gold_special', condition: 'new', buying_mode: 'buy_it_now', currency_id: 'BRL', category_id: '', description: '', video_id: '', _attributes: [], _variations: [], _shipping: null, _sale_terms: [], _pictures: [], _package: DEFAULT_PACKAGE_FORM() })}
                 className="px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded-lg transition-colors flex items-center gap-1.5">
                 <Plus className="w-4 h-4" /> Novo Modelo
+              </button>
+              <button type="button" onClick={() => setPackagePresetsModalOpen(true)}
+                className="px-3 py-2 border border-amber-400/80 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-900 dark:text-amber-200 text-sm rounded-lg transition-colors flex items-center gap-1.5 hover:bg-amber-100 dark:hover:bg-amber-900/50">
+                <Ruler className="w-4 h-4" /> Caixas (presets)
               </button>
               {selectedModels.size > 0 && (
                 <>
@@ -1127,7 +1610,7 @@ export const Anuncios = ({ user }) => {
                                       try { _shipping = JSON.parse(model.shipping || 'null'); } catch {}
                                       try { _sale_terms = JSON.parse(model.sale_terms || '[]'); } catch {}
                                       try { _pictures = JSON.parse(model.pictures || '[]'); } catch {}
-                                      setModelEditModal({ ...model, description: model.description || '', _attributes, _variations, _shipping, _sale_terms, _pictures });
+                                      setModelEditModal({ ...model, description: model.description || '', _attributes, _variations, _shipping, _sale_terms, _pictures, _package: parsePackageMeasuresFromModel(model) });
                                       setOpenActionMenu(null);
                                     }}
                                       className="w-full text-left px-3 py-2 text-sm flex items-center gap-2.5 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
@@ -1147,7 +1630,7 @@ export const Anuncios = ({ user }) => {
                                       className="w-full text-left px-3 py-2 text-sm flex items-center gap-2.5 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
                                       <Download className="w-3.5 h-3.5 text-purple-500" /> Download fotos
                                     </a>
-                                    <button onClick={() => { const m = model; const dup = { ...m, id: undefined, title: `${m.title} (cópia)` }; setModelEditModal({ ...dup, description: dup.description || '', _attributes: (() => { try { return JSON.parse(m.attributes || '[]'); } catch { return []; } })(), _variations: (() => { try { return JSON.parse(m.variations || '[]'); } catch { return []; } })(), _shipping: (() => { try { return JSON.parse(m.shipping || 'null'); } catch { return null; } })(), _sale_terms: (() => { try { return JSON.parse(m.sale_terms || '[]'); } catch { return []; } })(), _pictures: (() => { try { return JSON.parse(m.pictures || '[]'); } catch { return []; } })() }); setOpenActionMenu(null); }}
+                                    <button onClick={() => { const m = model; const dup = { ...m, id: undefined, title: `${m.title} (cópia)` }; setModelEditModal({ ...dup, description: dup.description || '', _attributes: (() => { try { return JSON.parse(m.attributes || '[]'); } catch { return []; } })(), _variations: (() => { try { return JSON.parse(m.variations || '[]'); } catch { return []; } })(), _shipping: (() => { try { return JSON.parse(m.shipping || 'null'); } catch { return null; } })(), _sale_terms: (() => { try { return JSON.parse(m.sale_terms || '[]'); } catch { return []; } })(), _pictures: (() => { try { return JSON.parse(m.pictures || '[]'); } catch { return []; } })(), _package: parsePackageMeasuresFromModel(m) }); setOpenActionMenu(null); }}
                                       className="w-full text-left px-3 py-2 text-sm flex items-center gap-2.5 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
                                       <Copy className="w-3.5 h-3.5 text-indigo-500" /> Duplicar modelo
                                     </button>
@@ -1542,7 +2025,7 @@ export const Anuncios = ({ user }) => {
                     className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Tipo de listagem</label>
+                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Tipo de anúncio (Mercado Livre)</label>
                   <select value={editModal.listing_type_id} onChange={e => setEditModal(p => ({ ...p, listing_type_id: e.target.value }))}
                     className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white">
                     <option value="gold_pro">Premium</option>
@@ -1811,67 +2294,28 @@ export const Anuncios = ({ user }) => {
 
       {/* Model Edit Modal */}
       {modelEditModal && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-y-auto p-6">
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-3 sm:p-4">
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-[min(96rem,98vw)] max-h-[92vh] overflow-y-auto p-5 sm:p-6">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-bold text-gray-900 dark:text-white">{modelEditModal.id ? 'Editar Modelo' : 'Novo Modelo de Anúncio'}</h3>
               <button onClick={() => setModelEditModal(null)} className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700"><X className="w-5 h-5" /></button>
             </div>
             <div className="space-y-4">
-              <div className="grid grid-cols-3 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">SKU</label>
-                  <input type="text" value={modelEditModal.sku || ''} onChange={e => setModelEditModal(p => ({ ...p, sku: e.target.value }))}
-                    className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white font-mono" />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">EAN</label>
-                  <input type="text" value={modelEditModal.ean || ''} onChange={e => setModelEditModal(p => ({ ...p, ean: e.target.value }))}
-                    className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white font-mono" />
-                </div>
-                <div>
+              <div className="grid grid-cols-1 xl:grid-cols-12 gap-3 xl:gap-4 items-start">
+                <div className="xl:col-span-3 min-w-0">
                   <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Categoria</label>
                   <input type="text" value={modelEditModal.category_name || modelEditModal.category_id || ''} readOnly
                     className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-gray-50 dark:bg-gray-700/50 text-gray-900 dark:text-white cursor-default" />
                   {modelEditModal.category_id && (
-                    <span className="text-[10px] text-gray-400 mt-0.5 block font-mono">{modelEditModal.category_id}</span>
+                    <span className="text-[10px] text-gray-400 mt-0.5 block font-mono truncate" title={modelEditModal.category_id}>{modelEditModal.category_id}</span>
                   )}
                 </div>
-              </div>
-
-              {modelEditModal.title?.length > 60 && (
-                <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-700 rounded-lg p-3 text-xs text-yellow-700 dark:text-yellow-400">
-                  <AlertTriangle className="w-4 h-4 inline mr-1" />
-                  Título tem {modelEditModal.title.length} caracteres. Será truncado para 60 na publicação.
+                <div className="xl:col-span-6 min-w-0">
+                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Título ({modelEditModal.title?.length || 0}/60)</label>
+                  <input type="text" value={modelEditModal.title || ''} onChange={e => setModelEditModal(p => ({ ...p, title: e.target.value }))}
+                    className={`w-full px-3 py-2 border rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white ${modelEditModal.title?.length > 60 ? 'border-yellow-400 dark:border-yellow-500' : 'dark:border-gray-600'}`} />
                 </div>
-              )}
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Título ({modelEditModal.title?.length || 0}/60)</label>
-                <input type="text" value={modelEditModal.title || ''} onChange={e => setModelEditModal(p => ({ ...p, title: e.target.value }))}
-                  className={`w-full px-3 py-2 border rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white ${modelEditModal.title?.length > 60 ? 'border-yellow-400 dark:border-yellow-500' : 'dark:border-gray-600'}`} />
-              </div>
-
-              <div className="grid grid-cols-4 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Preço (R$)</label>
-                  <input type="number" step="0.01" value={modelEditModal.price || ''} onChange={e => setModelEditModal(p => ({ ...p, price: e.target.value }))}
-                    className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Quantidade</label>
-                  <input type="number" value={modelEditModal.available_quantity || ''} onChange={e => setModelEditModal(p => ({ ...p, available_quantity: e.target.value }))}
-                    className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Tipo de listagem</label>
-                  <select value={modelEditModal.listing_type_id || 'gold_special'} onChange={e => setModelEditModal(p => ({ ...p, listing_type_id: e.target.value }))}
-                    className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white">
-                    <option value="gold_pro">Premium</option>
-                    <option value="gold_special">Clássico</option>
-                    <option value="free">Grátis</option>
-                  </select>
-                </div>
-                <div>
+                <div className="xl:col-span-3 min-w-0">
                   <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Condição</label>
                   <select value={modelEditModal.condition || 'new'} onChange={e => setModelEditModal(p => ({ ...p, condition: e.target.value }))}
                     className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white">
@@ -1881,133 +2325,601 @@ export const Anuncios = ({ user }) => {
                 </div>
               </div>
 
+              {modelEditModal.title?.length > 60 && (
+                <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-700 rounded-lg p-3 text-xs text-yellow-700 dark:text-yellow-400">
+                  <AlertTriangle className="w-4 h-4 inline mr-1" />
+                  Título tem {modelEditModal.title.length} caracteres. Será truncado para 60 na publicação.
+                </div>
+              )}
+
               <div>
                 <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Descrição</label>
                 <textarea rows={4} value={modelEditModal.description || ''} onChange={e => setModelEditModal(p => ({ ...p, description: e.target.value }))}
                   className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white resize-y" />
               </div>
 
-              {modelEditModal._pictures && modelEditModal._pictures.length > 0 && (() => {
-                const allPics = modelEditModal._pictures;
-                const variations = modelEditModal._variations || [];
-                const varPicIds = new Set(variations.flatMap(v => v.picture_ids || []));
-                const generalPics = allPics.filter(p => !varPicIds.has(p.id));
-                return (
-                  <div>
-                    <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Imagens ({allPics.length})</label>
-                    {generalPics.length > 0 && (
-                      <div className="mb-2">
-                        <span className="text-[10px] font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Gerais</span>
-                        <div className="flex gap-1.5 flex-wrap mt-1">
-                          {generalPics.map((p, i) => <img key={i} src={p.source || p.secure_url} alt="" className="w-14 h-14 rounded object-cover bg-gray-100 dark:bg-gray-700" />)}
+              {/* Imagens */}
+              <div className="border border-gray-200 dark:border-gray-600 rounded-xl p-4 space-y-3 bg-gray-50/50 dark:bg-gray-900/20">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Image className="w-4 h-4 text-blue-500 flex-shrink-0" />
+                  <span className="text-sm font-semibold text-gray-800 dark:text-gray-200">Imagens ({(modelEditModal._pictures || []).length})</span>
+                </div>
+                <input ref={modelPictureFileInputRef} type="file" accept="image/jpeg,image/png,image/gif,image/webp" className="hidden" onChange={handleModelPictureFile} />
+                {(modelEditModal._pictures || []).length === 0 ? (
+                  <p className="text-xs text-gray-400 italic">Nenhuma imagem ainda. Adicione pelo menos uma antes de publicar.</p>
+                ) : (
+                  <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                    {(modelEditModal._pictures || []).map((p, pi) => (
+                      <div key={String(p.id || p.source || pi)} className="flex items-start gap-2 p-2 rounded-lg bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700">
+                        <span className="text-[10px] text-gray-400 w-6 pt-1 text-right flex-shrink-0">{pi + 1}</span>
+                        <img src={p.source || p.secure_url} alt="" className="w-14 h-14 rounded object-cover bg-gray-100 dark:bg-gray-700 flex-shrink-0" onError={(e) => { e.target.style.opacity = 0.35; }} />
+                        <div className="flex-1 min-w-0">
+                          <label className="text-[10px] text-gray-500 dark:text-gray-400 block mb-0.5">Link da imagem</label>
+                          <input type="text" value={p.source || p.secure_url || ''} onChange={(e) => {
+                            const u = [...(modelEditModal._pictures || [])];
+                            u[pi] = { ...u[pi], source: e.target.value };
+                            setModelEditModal((prev) => ({ ...prev, _pictures: u }));
+                          }} className="w-full text-sm border border-gray-200 dark:border-gray-600 rounded px-2 py-1.5 bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
+                        </div>
+                        <div className="flex flex-col gap-0.5 flex-shrink-0">
+                          <button type="button" disabled={pi === 0} onClick={() => {
+                            const u = [...(modelEditModal._pictures || [])];
+                            if (pi === 0) return;
+                            [u[pi - 1], u[pi]] = [u[pi], u[pi - 1]];
+                            setModelEditModal((prev) => ({ ...prev, _pictures: u }));
+                          }} className="p-1 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 rounded disabled:opacity-25" title="Subir"><ChevronUp className="w-4 h-4" /></button>
+                          <button type="button" disabled={pi >= (modelEditModal._pictures || []).length - 1} onClick={() => {
+                            const u = [...(modelEditModal._pictures || [])];
+                            if (pi >= u.length - 1) return;
+                            [u[pi], u[pi + 1]] = [u[pi + 1], u[pi]];
+                            setModelEditModal((prev) => ({ ...prev, _pictures: u }));
+                          }} className="p-1 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 rounded disabled:opacity-25" title="Descer"><ChevronDown className="w-4 h-4" /></button>
+                          <button type="button" onClick={() => {
+                            const pid = p.id;
+                            const pics = [...(modelEditModal._pictures || [])];
+                            pics.splice(pi, 1);
+                            const vars = (modelEditModal._variations || []).map((vv) => ({
+                              ...vv,
+                              picture_ids: (vv.picture_ids || []).filter((x) => String(x) !== String(pid)),
+                            }));
+                            setModelEditModal((prev) => ({ ...prev, _pictures: pics, _variations: vars }));
+                          }} className="p-1 text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 rounded" title="Remover"><Trash2 className="w-4 h-4" /></button>
                         </div>
                       </div>
-                    )}
-                    {variations.length > 0 && variations.some(v => (v.picture_ids || []).length > 0) && (
-                      <div className="space-y-2">
-                        {variations.map((v, vi) => {
-                          const vPics = (v.picture_ids || []).map(pid => allPics.find(p => p.id === pid)).filter(Boolean);
-                          if (vPics.length === 0) return null;
-                          const comboLabel = (v.attribute_combinations || []).map(ac => ac.value_name || ac.value_id).join(', ');
-                          return (
-                            <div key={vi}>
-                              <span className="text-[10px] font-medium text-blue-500 dark:text-blue-400 uppercase tracking-wider">
-                                {comboLabel || `Variação ${vi + 1}`}
-                              </span>
-                              <div className="flex gap-1.5 flex-wrap mt-1">
-                                {vPics.map((p, i) => <img key={i} src={p.source || p.secure_url} alt="" className="w-14 h-14 rounded object-cover bg-gray-100 dark:bg-gray-700 ring-1 ring-blue-300 dark:ring-blue-700" />)}
-                              </div>
-                            </div>
-                  );
-                })}
-                      </div>
-                    )}
-                    {generalPics.length === 0 && variations.length === 0 && (
-                      <div className="flex gap-1.5 flex-wrap">
-                        {allPics.map((p, i) => <img key={i} src={p.source || p.secure_url} alt="" className="w-14 h-14 rounded object-cover bg-gray-100 dark:bg-gray-700" />)}
-                      </div>
-                    )}
+                    ))}
                   </div>
-                );
-              })()}
+                )}
+                <div className="flex flex-wrap gap-2">
+                  <button type="button" onClick={() => {
+                    setModelShowPicUrlInput((s) => {
+                      if (s) setModelPicUrlDraft('');
+                      return !s;
+                    });
+                  }}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium whitespace-nowrap">
+                    Adicionar URL
+                  </button>
+                  <button type="button" disabled={modelPicUploading} onClick={() => modelPictureFileInputRef.current?.click()}
+                    className="px-4 py-2 border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-800 dark:text-gray-200 rounded-lg text-sm font-medium whitespace-nowrap flex items-center justify-center gap-2 disabled:opacity-50">
+                    {modelPicUploading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                    Enviar arquivo
+                  </button>
+                </div>
+                {modelShowPicUrlInput && (
+                  <div className="flex flex-col sm:flex-row gap-2 flex-wrap pt-1 border-t border-gray-200 dark:border-gray-600">
+                    <input type="url" placeholder="Cole o link da imagem (https://...)" value={modelPicUrlDraft} onChange={e => setModelPicUrlDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          const url = modelPicUrlDraft.trim();
+                          if (!url) return;
+                          setModelEditModal((p) => ({ ...p, _pictures: [...(p._pictures || []), { id: `pic-${Date.now()}`, source: url }] }));
+                          setModelPicUrlDraft('');
+                          setModelShowPicUrlInput(false);
+                        }
+                      }}
+                      className="flex-1 min-w-0 px-3 py-2 text-sm border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
+                    <button type="button" onClick={() => {
+                      const url = modelPicUrlDraft.trim();
+                      if (!url) return;
+                      setModelEditModal((p) => ({ ...p, _pictures: [...(p._pictures || []), { id: `pic-${Date.now()}`, source: url }] }));
+                      setModelPicUrlDraft('');
+                      setModelShowPicUrlInput(false);
+                    }} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium whitespace-nowrap">Incluir link</button>
+                    <button type="button" onClick={() => { setModelShowPicUrlInput(false); setModelPicUrlDraft(''); }} className="px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700">Cancelar</button>
+                  </div>
+                )}
+              </div>
 
               {(modelEditModal._attributes || []).length > 0 && (
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-2">Atributos ({modelEditModal._attributes.length})</label>
-                  <div className="border dark:border-gray-600 rounded-lg overflow-hidden max-h-48 overflow-y-auto">
-                    <table className="w-full text-xs">
-                      <thead className="bg-gray-50 dark:bg-gray-700/50 sticky top-0">
-                        <tr>
-                          <th className="px-3 py-1.5 text-left text-gray-500 dark:text-gray-400 font-medium">ID</th>
-                          <th className="px-3 py-1.5 text-left text-gray-500 dark:text-gray-400 font-medium">Nome</th>
-                          <th className="px-3 py-1.5 text-left text-gray-500 dark:text-gray-400 font-medium">Valor</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y dark:divide-gray-700">
-                        {modelEditModal._attributes.map((attr, i) => (
-                          <tr key={i} className="hover:bg-gray-50 dark:hover:bg-gray-700/30">
-                            <td className="px-3 py-1.5 text-gray-500 dark:text-gray-400 font-mono">{attr.id}</td>
-                            <td className="px-3 py-1.5 text-gray-700 dark:text-gray-300">{attr.name || '-'}</td>
-                            <td className="px-3 py-1.5">
-                              <input type="text" value={attr.value_name || attr.value_id || ''}
-                                onChange={e => { const u = [...modelEditModal._attributes]; u[i] = { ...u[i], value_name: e.target.value }; setModelEditModal(p => ({ ...p, _attributes: u })); }}
-                                className="w-full px-2 py-0.5 border dark:border-gray-600 rounded text-xs bg-white dark:bg-gray-700 text-gray-900 dark:text-white" placeholder="(vazio)" />
-                            </td>
-                          </tr>
-                        ))}
-              </tbody>
-            </table>
+                <div className="space-y-3">
+                  <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-800 dark:text-gray-200">Atributos ({modelEditModal._attributes.length})</label>
+                      <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">
+                        Regras da categoria ML ({modelEditModal.category_id || '—'}). Campos obrigatórios vazios ficam em destaque. Atributos que o ML trata como <strong className="font-medium text-gray-600 dark:text-gray-300">eixo de variação</strong> (ex.: cor, voltagem, frequência/rotação) aparecem na secção <strong className="font-medium text-gray-600 dark:text-gray-300">Variações</strong> abaixo, em cada linha — não nesta lista.
+                      </p>
+                    </div>
+                    {modelCategorySchemaLoading && (
+                      <span className="text-xs text-blue-600 dark:text-blue-400 flex items-center gap-1.5">
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Carregando regras do ML…
+                      </span>
+                    )}
                   </div>
-          </div>
-        )}
 
-              {(modelEditModal._variations || []).length > 0 && (
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-2">Variações ({modelEditModal._variations.length})</label>
-                  <div className="border dark:border-gray-600 rounded-lg overflow-hidden max-h-64 overflow-y-auto">
-                    <table className="w-full text-xs">
-                      <thead className="bg-gray-50 dark:bg-gray-700/50 sticky top-0">
-                        <tr>
-                          <th className="px-3 py-1.5 text-left text-gray-500 dark:text-gray-400 font-medium">Fotos</th>
-                          <th className="px-3 py-1.5 text-left text-gray-500 dark:text-gray-400 font-medium">Combinação</th>
-                          <th className="px-3 py-1.5 text-left text-gray-500 dark:text-gray-400 font-medium">SKU</th>
-                          <th className="px-3 py-1.5 text-left text-gray-500 dark:text-gray-400 font-medium">Qtd</th>
-                          <th className="px-3 py-1.5 text-left text-gray-500 dark:text-gray-400 font-medium">Preço</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y dark:divide-gray-700">
-                        {modelEditModal._variations.map((v, i) => {
-                          const vPics = (v.picture_ids || []).map(pid => (modelEditModal._pictures || []).find(p => p.id === pid)).filter(Boolean);
+                  {!modelCategorySchemaLoading && modelEditModal.category_id && modelCategorySchema === null && (
+                    <div className="text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg px-3 py-2">
+                      <AlertTriangle className="w-3.5 h-3.5 inline mr-1 align-text-bottom" />
+                      Não foi possível carregar as regras da categoria. Os destaques de obrigatoriedade podem não aparecer.
+                    </div>
+                  )}
+
+                  {modelAttrAnalysis.missingCount > 0 && (
+                    <div className="text-xs text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900 rounded-lg px-3 py-2.5 flex items-start gap-2">
+                      <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                      <div>
+                        <strong>{modelAttrAnalysis.missingCount}</strong> atributo(s) obrigatório(s) pelo Mercado Livre estão sem valor. Preencha antes de publicar para evitar erro 400.
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
+                    <input
+                      type="search"
+                      value={modelAttrSearch}
+                      onChange={e => setModelAttrSearch(e.target.value)}
+                      placeholder="Buscar por nome ou ID…"
+                      className="flex-1 min-w-0 px-3 py-2 text-sm border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                    />
+                    <div className="flex rounded-lg border border-gray-200 dark:border-gray-600 overflow-hidden text-xs font-medium">
+                      <button
+                        type="button"
+                        onClick={() => setModelAttrFilter('all')}
+                        className={`px-3 py-2 transition-colors ${modelAttrFilter === 'all' ? 'bg-gray-100 dark:bg-gray-600 text-gray-900 dark:text-white' : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-700'}`}
+                      >
+                        Todos ({modelAttrAnalysis.rows.length})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setModelAttrFilter('issues')}
+                        className={`px-3 py-2 transition-colors border-l border-gray-200 dark:border-gray-600 ${modelAttrFilter === 'issues' ? 'bg-red-50 dark:bg-red-950/40 text-red-800 dark:text-red-300' : 'bg-white dark:bg-gray-800 text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-700'}`}
+                      >
+                        Pendências ({modelAttrAnalysis.rows.filter(r => r.issue).length})
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="border border-gray-200 dark:border-gray-600 rounded-xl max-h-[min(36rem,62vh)] overflow-y-auto p-2 bg-gray-50/50 dark:bg-gray-900/20">
+                    {modelAttrFilteredRows.length === 0 ? (
+                      <div className="text-sm text-gray-500 text-center py-6 space-y-2 px-2">
+                        <p>Nenhum atributo do <strong className="font-medium text-gray-700 dark:text-gray-300">item</strong> para este filtro.</p>
+                        {modelAttrSearch.trim() && modelVariationAxesMatchingSearch.length > 0 ? (
+                          <p className="text-xs text-amber-800 dark:text-amber-200/90 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-lg px-3 py-2 text-left">
+                            O termo coincide com atributos de <strong>variação</strong> no ML ({modelVariationAxesMatchingSearch.map((a) => a.name || a.id).join(', ')}). Abra cada variação abaixo e edite <strong>Combinação de atributos</strong>.
+                          </p>
+                        ) : modelAttrSearch.trim() && /frequ|rota|rpm/i.test(modelAttrSearch) ? (
+                          <p className="text-xs text-gray-600 dark:text-gray-400 text-left max-w-lg mx-auto">
+                            Rotação em rpm costuma ser <strong className="font-medium">Velocidade máxima de rotação</strong> (<span className="font-mono">MAX_ROTATION_SPEED</span>) nesta lista, ou um eixo na secção Variações. «Frequência» no ML (Hz) é outro campo (<span className="font-mono">FREQUENCY</span>).
+                          </p>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2">
+                        {modelAttrFilteredRows.map((r) => {
+                          const val = (r.attr.value_name || r.attr.value_id || '').toString();
+                          const maxLen = r.def?.value_max_length;
+                          const inputBorder = r.issue
+                            ? 'border-red-400 ring-1 ring-red-100 dark:ring-red-900/50'
+                            : r.mlMandatory && !r.empty
+                              ? 'border-emerald-300 dark:border-emerald-700'
+                              : 'border-gray-200 dark:border-gray-600';
                           return (
-                            <tr key={i} className="hover:bg-gray-50 dark:hover:bg-gray-700/30 align-top">
-                              <td className="px-3 py-1.5">
-                                <div className="flex gap-1 flex-wrap">
-                                  {vPics.length > 0 ? vPics.slice(0, 3).map((p, pi) => (
-                                    <img key={pi} src={p.source || p.secure_url} alt="" className="w-8 h-8 rounded object-cover bg-gray-100 dark:bg-gray-700" />
-                                  )) : <span className="text-gray-400 text-[10px]">-</span>}
-                                  {vPics.length > 3 && <span className="text-[10px] text-gray-400 self-center">+{vPics.length - 3}</span>}
-      </div>
-                              </td>
-                              <td className="px-3 py-1.5 text-gray-700 dark:text-gray-300">
-                                {(v.attribute_combinations || []).map(ac => `${ac.name || ac.id}: ${ac.value_name || ac.value_id}`).join(', ') || '-'}
-                              </td>
-                              <td className="px-3 py-1.5">
-                                <input type="text" value={v.seller_custom_field || ''} onChange={e => { const u = [...modelEditModal._variations]; u[i] = { ...u[i], seller_custom_field: e.target.value }; setModelEditModal(p => ({ ...p, _variations: u })); }}
-                                  className="w-full px-2 py-0.5 border dark:border-gray-600 rounded text-xs bg-white dark:bg-gray-700 text-gray-900 dark:text-white" placeholder="(vazio)" />
-                              </td>
-                              <td className="px-3 py-1.5">
-                                <input type="number" value={v.available_quantity || 0} onChange={e => { const u = [...modelEditModal._variations]; u[i] = { ...u[i], available_quantity: parseInt(e.target.value, 10) || 0 }; setModelEditModal(p => ({ ...p, _variations: u })); }}
-                                  className="w-16 px-2 py-0.5 border dark:border-gray-600 rounded text-xs bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
-                              </td>
-                              <td className="px-3 py-1.5">
-                                <input type="number" step="0.01" value={v.price || ''} onChange={e => { const u = [...modelEditModal._variations]; u[i] = { ...u[i], price: parseFloat(e.target.value) || 0 }; setModelEditModal(p => ({ ...p, _variations: u })); }}
-                                  className="w-20 px-2 py-0.5 border dark:border-gray-600 rounded text-xs bg-white dark:bg-gray-700 text-gray-900 dark:text-white" placeholder="(vazio)" />
-                              </td>
-                            </tr>
+                            <div
+                              key={`${r.attr.id}-${r.index}`}
+                              className={`rounded-lg border p-2 min-w-0 transition-colors ${
+                                r.issue
+                                  ? 'border-red-300 bg-red-50/80 dark:bg-red-950/25 dark:border-red-800'
+                                  : r.mlMandatory && !r.empty
+                                    ? 'border-emerald-200 bg-emerald-50/40 dark:bg-emerald-950/10 dark:border-emerald-700/50'
+                                    : 'border-gray-200 bg-white dark:bg-gray-800/80 dark:border-gray-600'
+                              }`}
+                            >
+                              <div className="flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5 mb-1">
+                                <span className="text-xs font-semibold text-gray-900 dark:text-white leading-tight break-words">{r.displayName}</span>
+                                <span className="text-[9px] font-mono text-gray-400 dark:text-gray-500 shrink-0">{r.attr.id}</span>
+                              </div>
+                              <div className="flex flex-wrap gap-1 mb-1.5">
+                                {r.ignored && (
+                                  <span className="text-[9px] font-medium px-1 py-0.5 rounded bg-gray-200 dark:bg-gray-600 text-gray-600 dark:text-gray-300">Ignorado</span>
+                                )}
+                                {!r.ignored && r.required && (
+                                  <span className="text-[9px] font-bold px-1 py-0.5 rounded bg-red-100 text-red-800 dark:bg-red-900/50 dark:text-red-200">Obrig. ML</span>
+                                )}
+                                {!r.ignored && !r.required && r.catalogRequired && (
+                                  <span className="text-[9px] font-semibold px-1 py-0.5 rounded bg-violet-100 text-violet-800 dark:bg-violet-900/40 dark:text-violet-200">Catálogo</span>
+                                )}
+                                {r.issue && (
+                                  <span className="text-[9px] font-bold text-red-700 dark:text-red-400">Preencher</span>
+                                )}
+                              </div>
+                              <input
+                                type="text"
+                                value={val}
+                                onChange={(e) => {
+                                  const u = [...modelEditModal._attributes];
+                                  u[r.index] = { ...u[r.index], value_name: e.target.value, value_id: null };
+                                  setModelEditModal((p) => ({ ...p, _attributes: u }));
+                                }}
+                                placeholder="Valor"
+                                maxLength={typeof maxLen === 'number' && maxLen > 0 ? maxLen : undefined}
+                                className={`w-full min-w-0 px-2 py-1.5 rounded-md text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white ${inputBorder}`}
+                              />
+                              <div className="mt-1 text-[9px] text-gray-500 dark:text-gray-400 flex flex-wrap justify-between gap-x-2 gap-y-0">
+                                <span className="tabular-nums">
+                                  {typeof maxLen === 'number' && maxLen > 0 ? `${val.length}/${maxLen}` : val.length}
+                                  {r.def?.value_type ? (
+                                    <span className="text-gray-400 dark:text-gray-500"> · <span className="font-mono">{r.def.value_type}</span></span>
+                                  ) : null}
+                                </span>
+                              </div>
+                            </div>
                           );
                         })}
-                      </tbody>
-                    </table>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Medidas da embalagem — acima das variações (ML: PACKAGE_* no POST /items) */}
+              <div className="border border-amber-200 dark:border-amber-900/50 rounded-xl p-4 space-y-3 bg-amber-50/40 dark:bg-amber-950/15">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Ruler className="w-4 h-4 text-amber-600 dark:text-amber-400 flex-shrink-0" />
+                  <span className="text-sm font-semibold text-gray-800 dark:text-gray-200">Medidas da embalagem</span>
+                </div>
+                <div className="space-y-2">
+                  <label className="flex items-start gap-2 cursor-pointer text-sm text-gray-800 dark:text-gray-200">
+                    <input
+                      type="radio"
+                      className="mt-1"
+                      checked={modelEditModal._package?.has_factory_packaging !== false}
+                      onChange={() => setModelEditModal((p) => ({ ...p, _package: { ...(p._package || DEFAULT_PACKAGE_FORM()), has_factory_packaging: true } }))}
+                    />
+                    <span>Tem caixa, envelope ou embalagem de fábrica — informe as medidas abaixo (ou escolha uma caixa salva).</span>
+                  </label>
+                  <label className="flex items-start gap-2 cursor-pointer text-sm text-gray-800 dark:text-gray-200">
+                    <input
+                      type="radio"
+                      className="mt-1"
+                      checked={modelEditModal._package?.has_factory_packaging === false}
+                      onChange={() => setModelEditModal((p) => ({ ...p, _package: { ...(p._package || DEFAULT_PACKAGE_FORM()), has_factory_packaging: false, preset_id: null } }))}
+                    />
+                    <span>Meu produto não tem embalagem com essas características (não enviamos medidas ao ML).</span>
+                  </label>
+                </div>
+                {modelEditModal._package?.has_factory_packaging !== false && (
+                  <div className="space-y-3 pt-1">
+                    <div className="min-w-0">
+                      <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Caixas salvas</label>
+                      <select
+                        value={modelEditModal._package?.preset_id != null ? String(modelEditModal._package.preset_id) : ''}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          if (!v) {
+                            setModelEditModal((p) => ({ ...p, _package: { ...(p._package || DEFAULT_PACKAGE_FORM()), preset_id: null } }));
+                            return;
+                          }
+                          const pr = packagePresets.find((x) => String(x.id) === v);
+                          if (!pr) return;
+                          setModelEditModal((p) => ({
+                            ...p,
+                            _package: {
+                              ...(p._package || DEFAULT_PACKAGE_FORM()),
+                              preset_id: pr.id,
+                              has_factory_packaging: true,
+                              width_cm: String(pr.width_cm),
+                              height_cm: String(pr.height_cm),
+                              depth_cm: String(pr.depth_cm),
+                              weight_kg: String(pr.weight_kg),
+                            },
+                          }));
+                        }}
+                        className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                      >
+                        <option value="">— Medidas manuais —</option>
+                        {packagePresets.map((pr) => (
+                          <option key={pr.id} value={pr.id}>
+                            {pr.name} ({pr.width_cm}×{pr.height_cm}×{pr.depth_cm} cm, {pr.weight_kg} kg)
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                      <div>
+                        <label className="block text-[11px] font-medium text-gray-600 dark:text-gray-400 mb-0.5">Largura (cm)</label>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.1"
+                          value={modelEditModal._package?.width_cm ?? ''}
+                          onChange={(e) => setModelEditModal((p) => ({ ...p, _package: { ...(p._package || DEFAULT_PACKAGE_FORM()), width_cm: e.target.value, preset_id: null } }))}
+                          className="w-full px-2 py-1.5 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-medium text-gray-600 dark:text-gray-400 mb-0.5">Altura (cm)</label>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.1"
+                          value={modelEditModal._package?.height_cm ?? ''}
+                          onChange={(e) => setModelEditModal((p) => ({ ...p, _package: { ...(p._package || DEFAULT_PACKAGE_FORM()), height_cm: e.target.value, preset_id: null } }))}
+                          className="w-full px-2 py-1.5 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-medium text-gray-600 dark:text-gray-400 mb-0.5">Profundidade (cm)</label>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.1"
+                          value={modelEditModal._package?.depth_cm ?? ''}
+                          onChange={(e) => setModelEditModal((p) => ({ ...p, _package: { ...(p._package || DEFAULT_PACKAGE_FORM()), depth_cm: e.target.value, preset_id: null } }))}
+                          className="w-full px-2 py-1.5 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-medium text-gray-600 dark:text-gray-400 mb-0.5">Peso (kg)</label>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.001"
+                          value={modelEditModal._package?.weight_kg ?? ''}
+                          onChange={(e) => setModelEditModal((p) => ({ ...p, _package: { ...(p._package || DEFAULT_PACKAGE_FORM()), weight_kg: e.target.value, preset_id: null } }))}
+                          className="w-full px-2 py-1.5 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="border border-gray-200 dark:border-gray-600 rounded-xl p-4 space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-sm font-semibold text-gray-800 dark:text-gray-200">Variações ({(modelEditModal._variations || []).length})</span>
+                  {modelShowVariationEditor && (
+                    <button type="button" onClick={() => {
+                      const axesRaw = modelVariationAxisAttrsFiltered.length > 0 ? modelVariationAxisAttrsFiltered : modelVariationAxisAttrs;
+                      const axes = axesRaw.length > 0 ? axesRaw : [];
+                      const basePrice = parseFloat(modelEditModal.price) || 0;
+                      const prev = (modelEditModal._variations || []).length > 0
+                        ? modelEditModal._variations[modelEditModal._variations.length - 1]
+                        : null;
+                      let combos;
+                      if (useNestedVariationUi && variationNestedSplit.secondary.length > 0) {
+                        const split = primarySecondaryVariationAttrs(axes.length > 0 ? axes : modelVariationAxisAttrs);
+                        combos = buildCombosFromSplit(split, { attribute_combinations: [] }, 'allEmpty');
+                      } else {
+                        combos = axes.length > 0
+                          ? axes.map((a) => ({ id: a.id, name: a.name, value_id: null, value_name: '' }))
+                          : [{ id: 'VAR', name: 'Variação', value_id: null, value_name: '' }];
+                      }
+                      const newIdx = (modelEditModal._variations || []).length;
+                      setModelEditModal((p) => ({
+                        ...p,
+                        _variations: [...(p._variations || []), {
+                          attribute_combinations: combos,
+                          price: prev != null ? (prev.price ?? basePrice) : basePrice,
+                          available_quantity: prev != null ? (prev.available_quantity ?? 1) : 1,
+                          picture_ids: prev ? [...(prev.picture_ids || [])] : [],
+                          seller_custom_field: '',
+                          attributes: [],
+                        }],
+                      }));
+                      setModelVariationExpanded((prev) => new Set([...prev, newIdx]));
+                    }} className="text-xs font-medium px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700">
+                      {useNestedVariationUi ? '+ Nova cor (grupo)' : '+ Adicionar variação'}
+                    </button>
+                  )}
+                </div>
+
+                {modelShowVariationEditor && modelVariationAxisChoice != null && modelVariationAxisChoice !== 'none' && (
+                  <div className="flex flex-wrap items-end gap-3 pb-3 border-b border-gray-200 dark:border-gray-600/80">
+                    <div className="w-full sm:w-44">
+                      <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Preço base (R$)</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={modelEditModal.price || ''}
+                        onChange={e => setModelEditModal(p => ({ ...p, price: e.target.value }))}
+                        className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {modelShowVariationAxisPicker && (
+                  <div className="rounded-xl border-2 border-dashed border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-950/20 p-4 space-y-3">
+                    <div className="flex flex-wrap gap-2">
+                      <button type="button" onClick={() => setModelVariationAxisChoice('color')}
+                        className="px-3 py-2 rounded-lg text-sm font-medium bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 hover:border-blue-400 dark:hover:border-blue-500 text-gray-800 dark:text-gray-200">Cor</button>
+                      <button type="button" onClick={() => setModelVariationAxisChoice('voltage')}
+                        className="px-3 py-2 rounded-lg text-sm font-medium bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 hover:border-blue-400 dark:hover:border-blue-500 text-gray-800 dark:text-gray-200">Voltagem</button>
+                      <button type="button" onClick={() => setModelVariationAxisChoice('full')}
+                        className="px-3 py-2 rounded-lg text-sm font-medium bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 hover:border-blue-400 dark:hover:border-blue-500 text-gray-800 dark:text-gray-200">Cor e voltagem</button>
+                      <button type="button" onClick={() => { setModelVariationAxisChoice('none'); setModelEditModal((p) => ({ ...p, _variations: [] })); }}
+                        className="px-3 py-2 rounded-lg text-sm font-medium bg-gray-100 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-600">Sem variação</button>
+                    </div>
+                  </div>
+                )}
+
+                {modelVariationAxisChoice === 'none' && (
+                  <div className="text-xs text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-900/30 rounded-lg px-3 py-2">
+                    Modelo sem variações (um único SKU).
+                    <button type="button" onClick={() => {
+                      setModelVariationAxisChoice(null);
+                      setModelEditModal((p) => ({ ...p, _variations: [] }));
+                    }} className="ml-2 text-blue-600 dark:text-blue-400 font-medium hover:underline">Alterar</button>
+                  </div>
+                )}
+
+                {modelVariationAxisAttrs.length === 0 && (modelEditModal._variations || []).length > 0 && (
+                  <p className="text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg px-3 py-2">
+                    <AlertTriangle className="w-3.5 h-3.5 inline mr-1" />
+                    Carregue a categoria ou defina combinações manualmente (edição de valor abaixo).
+                  </p>
+                )}
+                {modelShowVariationEditor && (modelEditModal._variations || []).length === 0 && (
+                  <p className="text-xs text-gray-400 italic">Nenhuma linha ainda. Use &quot;Adicionar variação&quot; copiando preço e estoque do anúncio — ajuste só cor ou voltagem em cada linha.</p>
+                )}
+                {modelShowVariationEditor && (modelEditModal._variations || []).length > 0 && (
+                  <div className="space-y-3 max-h-[min(36rem,58vh)] overflow-y-auto pr-1">
+                    {useNestedVariationUi ? (
+                      variationGroups.map((g) => (
+                        <div
+                          key={g.indices && g.indices.length ? `vg-${g.indices.join('-')}` : g.pk}
+                          className="rounded-xl border-2 border-violet-200/80 dark:border-violet-800/60 bg-violet-50/30 dark:bg-violet-950/15 overflow-hidden"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 border-b border-violet-200/60 dark:border-violet-800/50 bg-violet-100/40 dark:bg-violet-900/25">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <span className="text-[10px] font-bold text-violet-900 dark:text-violet-200 uppercase tracking-wide flex-shrink-0">Cor / grupo</span>
+                              <span className="text-sm font-semibold text-gray-800 dark:text-gray-100 truncate">{g.label}</span>
+                            </div>
+                            {g.indices[0] != null && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const sampleVi = g.indices[0];
+                                  setModelEditModal((p) => {
+                                    const vars = p._variations || [];
+                                    const sample = vars[sampleVi];
+                                    if (!sample) return p;
+                                    const axes = variationAxesUi.length > 0 ? variationAxesUi : modelVariationAxisAttrs;
+                                    const split = primarySecondaryVariationAttrs(axes);
+                                    const combos = buildCombosFromSplit(split, sample, 'cloneSecondary');
+                                    const basePrice = parseFloat(p.price) || 0;
+                                    const prev = sample;
+                                    const newIdx = vars.length;
+                                    queueMicrotask(() => setModelVariationExpanded((prevE) => new Set([...prevE, newIdx])));
+                                    return {
+                                      ...p,
+                                      _variations: [...vars, {
+                                        attribute_combinations: combos,
+                                        price: prev.price ?? basePrice,
+                                        available_quantity: prev.available_quantity ?? 1,
+                                        picture_ids: [...(prev.picture_ids || [])],
+                                        seller_custom_field: '',
+                                        attributes: [],
+                                      }],
+                                    };
+                                  });
+                                }}
+                                className="text-xs font-medium px-2.5 py-1.5 rounded-lg bg-white dark:bg-gray-800 border border-violet-300 dark:border-violet-600 text-violet-800 dark:text-violet-200 hover:bg-violet-50 dark:hover:bg-violet-900/40"
+                              >
+                                + Adicionar voltagem nesta cor
+                              </button>
+                            )}
+                          </div>
+                          <div className="p-2 space-y-2">
+                            {g.indices.map((vi) => (
+                              <ModelVariationAccordionRow
+                                key={vi}
+                                vi={vi}
+                                modelEditModal={modelEditModal}
+                                setModelEditModal={setModelEditModal}
+                                modelCategorySchema={modelCategorySchema}
+                                modelVariationExpanded={modelVariationExpanded}
+                                setModelVariationExpanded={setModelVariationExpanded}
+                                modelVariationAxisAttrs={modelVariationAxisAttrs}
+                                setModelVariationAxisChoice={setModelVariationAxisChoice}
+                              />
+                            ))}
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      (modelEditModal._variations || []).map((_, vi) => (
+                        <ModelVariationAccordionRow
+                          key={vi}
+                          vi={vi}
+                          modelEditModal={modelEditModal}
+                          setModelEditModal={setModelEditModal}
+                          modelCategorySchema={modelCategorySchema}
+                          modelVariationExpanded={modelVariationExpanded}
+                          setModelVariationExpanded={setModelVariationExpanded}
+                          modelVariationAxisAttrs={modelVariationAxisAttrs}
+                          setModelVariationAxisChoice={setModelVariationAxisChoice}
+                        />
+                      ))
+                    )}
+                    <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-gray-200 dark:border-gray-600">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const axesRaw = modelVariationAxisAttrsFiltered.length > 0 ? modelVariationAxisAttrsFiltered : modelVariationAxisAttrs;
+                          const axes = axesRaw.length > 0 ? axesRaw : [];
+                          const basePrice = parseFloat(modelEditModal.price) || 0;
+                          const prev = (modelEditModal._variations || []).length > 0
+                            ? modelEditModal._variations[modelEditModal._variations.length - 1]
+                            : null;
+                          let combos;
+                          if (useNestedVariationUi && variationNestedSplit.secondary.length > 0) {
+                            const split = primarySecondaryVariationAttrs(axes.length > 0 ? axes : modelVariationAxisAttrs);
+                            combos = buildCombosFromSplit(split, { attribute_combinations: [] }, 'allEmpty');
+                          } else {
+                            combos = axes.length > 0
+                              ? axes.map((a) => ({ id: a.id, name: a.name, value_id: null, value_name: '' }))
+                              : [{ id: 'VAR', name: 'Variação', value_id: null, value_name: '' }];
+                          }
+                          const newIdx = (modelEditModal._variations || []).length;
+                          setModelEditModal((p) => ({
+                            ...p,
+                            _variations: [...(p._variations || []), {
+                              attribute_combinations: combos,
+                              price: prev != null ? (prev.price ?? basePrice) : basePrice,
+                              available_quantity: prev != null ? (prev.available_quantity ?? 1) : 1,
+                              picture_ids: prev ? [...(prev.picture_ids || [])] : [],
+                              seller_custom_field: '',
+                              attributes: [],
+                            }],
+                          }));
+                          setModelVariationExpanded((prev) => new Set([...prev, newIdx]));
+                        }}
+                        className="text-xs font-medium px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700"
+                      >
+                        {useNestedVariationUi ? '+ Adicionar outra cor (novo grupo)' : '+ Adicionar outra linha de variação'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {modelVariationAxisChoice === 'none' && (
+                <div className="border border-emerald-200 dark:border-emerald-800 rounded-xl p-4 sm:p-5 space-y-3 bg-emerald-50/40 dark:bg-emerald-950/20">
+                  <div>
+                    <span className="text-sm font-semibold text-gray-900 dark:text-white">Identificação e valores (SKU único)</span>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">SKU</label>
+                      <input type="text" value={modelEditModal.sku || ''} onChange={e => setModelEditModal(p => ({ ...p, sku: e.target.value }))}
+                        className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white font-mono" />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">EAN</label>
+                      <input type="text" value={modelEditModal.ean || ''} onChange={e => setModelEditModal(p => ({ ...p, ean: e.target.value }))}
+                        className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white font-mono" />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Preço (R$)</label>
+                      <input type="number" step="0.01" value={modelEditModal.price || ''} onChange={e => setModelEditModal(p => ({ ...p, price: e.target.value }))}
+                        className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Quantidade</label>
+                      <input type="number" value={modelEditModal.available_quantity || ''} onChange={e => setModelEditModal(p => ({ ...p, available_quantity: e.target.value }))}
+                        className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
+                    </div>
                   </div>
                 </div>
               )}
@@ -2106,7 +3018,7 @@ export const Anuncios = ({ user }) => {
           </div>
 
                   {/* Listing type */}
-                  <p className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Tipo de Listagem</p>
+                  <p className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Tipo de anúncio (Mercado Livre)</p>
                   <div className="flex gap-2 mb-4">
                     <button onClick={() => setModelPublishModal(p => ({ ...p, listing_type_id: 'gold_special' }))}
                       className={`flex-1 px-3 py-3 rounded-lg border-2 text-sm transition-all ${pm.listing_type_id === 'gold_special'
@@ -2629,6 +3541,151 @@ export const Anuncios = ({ user }) => {
           </div>
         );
       })()}
+
+      {/* Presets de embalagem (caixas salvas) */}
+      {packagePresetsModalOpen && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[60] p-3 sm:p-4">
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200 dark:border-gray-700">
+              <div>
+                <h3 className="text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2">
+                  <Package className="w-5 h-5 text-amber-600" /> Caixas de embalagem
+                </h3>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">Presets reutilizáveis ao editar modelos (medidas enviadas ao ML como PACKAGE_*).</p>
+              </div>
+              <button type="button" onClick={() => setPackagePresetsModalOpen(false)} className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="overflow-y-auto flex-1 px-5 py-4 space-y-5">
+              <div className="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50/50 dark:bg-amber-950/20 p-4 space-y-3">
+                <p className="text-sm font-semibold text-gray-800 dark:text-gray-200">Nova caixa</p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div className="sm:col-span-2">
+                    <label className="block text-[11px] font-medium text-gray-600 dark:text-gray-400 mb-0.5">Nome</label>
+                    <input
+                      type="text"
+                      placeholder="Ex.: Caixa P — ventilador"
+                      value={presetNewDraft.name}
+                      onChange={(e) => setPresetNewDraft((p) => ({ ...p, name: e.target.value }))}
+                      className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-medium text-gray-600 dark:text-gray-400 mb-0.5">Largura (cm)</label>
+                    <input type="number" min="0" step="0.1" value={presetNewDraft.width_cm} onChange={(e) => setPresetNewDraft((p) => ({ ...p, width_cm: e.target.value }))}
+                      className="w-full px-2 py-1.5 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-medium text-gray-600 dark:text-gray-400 mb-0.5">Altura (cm)</label>
+                    <input type="number" min="0" step="0.1" value={presetNewDraft.height_cm} onChange={(e) => setPresetNewDraft((p) => ({ ...p, height_cm: e.target.value }))}
+                      className="w-full px-2 py-1.5 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-medium text-gray-600 dark:text-gray-400 mb-0.5">Profundidade (cm)</label>
+                    <input type="number" min="0" step="0.1" value={presetNewDraft.depth_cm} onChange={(e) => setPresetNewDraft((p) => ({ ...p, depth_cm: e.target.value }))}
+                      className="w-full px-2 py-1.5 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-medium text-gray-600 dark:text-gray-400 mb-0.5">Peso (kg)</label>
+                    <input type="number" min="0" step="0.001" value={presetNewDraft.weight_kg} onChange={(e) => setPresetNewDraft((p) => ({ ...p, weight_kg: e.target.value }))}
+                      className="w-full px-2 py-1.5 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={presetSaving}
+                  onClick={handlePresetModalAdd}
+                  className="px-4 py-2 bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg"
+                >
+                  {presetSaving ? 'Salvando…' : 'Adicionar caixa'}
+                </button>
+              </div>
+
+              <div>
+                <p className="text-sm font-semibold text-gray-800 dark:text-gray-200 mb-2">Suas caixas ({packagePresets.length})</p>
+                {packagePresets.length === 0 ? (
+                  <p className="text-sm text-gray-500 dark:text-gray-400 py-6 text-center border border-dashed border-gray-300 dark:border-gray-600 rounded-lg">Nenhuma caixa salva ainda.</p>
+                ) : (
+                  <ul className="space-y-2">
+                    {packagePresets.map((pr) => (
+                      <li key={pr.id} className="border border-gray-200 dark:border-gray-600 rounded-lg p-3 bg-gray-50/80 dark:bg-gray-900/30">
+                        {presetEditDraft?.id === pr.id ? (
+                          <div className="space-y-2">
+                            <input
+                              type="text"
+                              value={presetEditDraft.name}
+                              onChange={(e) => setPresetEditDraft((d) => ({ ...d, name: e.target.value }))}
+                              className="w-full px-2 py-1.5 border dark:border-gray-600 rounded text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                            />
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                              {['width_cm', 'height_cm', 'depth_cm', 'weight_kg'].map((k) => (
+                                <input
+                                  key={k}
+                                  type="number"
+                                  min="0"
+                                  step={k === 'weight_kg' ? '0.001' : '0.1'}
+                                  value={presetEditDraft[k]}
+                                  onChange={(e) => setPresetEditDraft((d) => ({ ...d, [k]: e.target.value }))}
+                                  className="px-2 py-1.5 border dark:border-gray-600 rounded text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                                  placeholder={k === 'weight_kg' ? 'kg' : 'cm'}
+                                />
+                              ))}
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              <button type="button" disabled={presetSaving} onClick={handlePresetModalSaveEdit} className="px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white text-xs rounded-lg disabled:opacity-50">Salvar</button>
+                              <button type="button" disabled={presetSaving} onClick={() => setPresetEditDraft(null)} className="px-3 py-1.5 border border-gray-300 dark:border-gray-600 text-xs rounded-lg text-gray-700 dark:text-gray-200">Cancelar</button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                            <div>
+                              <p className="text-sm font-medium text-gray-900 dark:text-white">{pr.name}</p>
+                              <p className="text-xs text-gray-500 dark:text-gray-400 font-mono">
+                                {pr.width_cm} × {pr.height_cm} × {pr.depth_cm} cm · {pr.weight_kg} kg
+                              </p>
+                            </div>
+                            <div className="flex items-center gap-2 flex-shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => setPresetEditDraft({
+                                  id: pr.id,
+                                  name: pr.name,
+                                  width_cm: String(pr.width_cm),
+                                  height_cm: String(pr.height_cm),
+                                  depth_cm: String(pr.depth_cm),
+                                  weight_kg: String(pr.weight_kg),
+                                })}
+                                className="px-2 py-1 text-xs font-medium text-blue-600 dark:text-blue-400 hover:underline"
+                              >
+                                Editar
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handlePresetModalDelete(pr.id)}
+                                disabled={presetSaving}
+                                className="p-1.5 rounded text-red-500 hover:bg-red-50 dark:hover:bg-red-950/40 disabled:opacity-50"
+                                title="Excluir"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+            <div className="px-5 py-3 border-t border-gray-200 dark:border-gray-700 flex justify-end">
+              <button type="button" onClick={() => setPackagePresetsModalOpen(false)} className="px-4 py-2 bg-gray-200 dark:bg-gray-600 text-gray-800 dark:text-gray-100 rounded-lg text-sm hover:bg-gray-300 dark:hover:bg-gray-500">
+                Fechar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Model Import Modal */}
       {modelImportModal && (

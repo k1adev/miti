@@ -1349,7 +1349,20 @@ function initDatabase() {
       if (cols && !cols.find(c => c.name === 'category_name')) {
         db.run("ALTER TABLE ad_models ADD COLUMN category_name TEXT");
       }
+      if (cols && !cols.find(c => c.name === 'package_measures')) {
+        db.run('ALTER TABLE ad_models ADD COLUMN package_measures TEXT');
+      }
     });
+
+    db.run(`CREATE TABLE IF NOT EXISTS package_presets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      width_cm REAL NOT NULL,
+      height_cm REAL NOT NULL,
+      depth_cm REAL NOT NULL,
+      weight_kg REAL NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
 
     db.run(`CREATE TABLE IF NOT EXISTS ad_model_publications (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3444,6 +3457,23 @@ async function mlApiPut(path, body, accountId) { return mlApiRequest('PUT', path
 async function mlApiPost(path, body, accountId) { return mlApiRequest('POST', path, body, accountId); }
 async function mlApiDelete(path, accountId) { return mlApiRequest('DELETE', path, null, accountId); }
 
+async function mlEnsureSellerUserId(accountId) {
+  const creds = await getMLCredentials(accountId);
+  if (creds?.mlUserId) return String(creds.mlUserId);
+  const token = await refreshMLTokenIfNeeded(accountId);
+  if (!token) throw new Error('Token ML indisponível');
+  const me = await mlApiGet('/users/me', accountId);
+  db.run('UPDATE ml_accounts SET ml_user_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [String(me.id), accountId]);
+  return String(me.id);
+}
+
+/** Vendedores com tag user_product_seller não podem usar array variations; cada variação é um POST /items com family_name (Price per variation / User Products). */
+async function mlSellerIsUserProductSeller(accountId) {
+  const uid = await mlEnsureSellerUserId(accountId);
+  const u = await mlApiGet(`/users/${uid}`, accountId);
+  return Array.isArray(u.tags) && u.tags.includes('user_product_seller');
+}
+
 // ─── ML Accounts ───
 app.get('/api/ml/accounts', (req, res) => {
   db.all(`SELECT id, name, client_id, redirect_uri, ml_user_id,
@@ -4585,6 +4615,7 @@ app.post('/api/ml/templates/:id/publish', async (req, res) => {
 
     let title = template.title || '';
     if (title.length > 60) title = title.substring(0, 60);
+    const familyNameTpl = String(template.title || '').trim().substring(0, 255) || title;
 
     const publishAttrs = attributes.filter(a => {
       if (['ITEM_CONDITION'].includes(a.id)) return false;
@@ -4603,6 +4634,7 @@ app.post('/api/ml/templates/:id/publish', async (req, res) => {
       pictures: pictures.map(p => ({ source: p.source })),
       attributes: publishAttrs,
     };
+    if (familyNameTpl) body.family_name = familyNameTpl;
 
     if (variations.length > 0) {
       const validVariations = variations.filter(v =>
@@ -4626,7 +4658,7 @@ app.post('/api/ml/templates/:id/publish', async (req, res) => {
           }
           return variation;
         });
-        delete body.available_quantity;
+        finalizeMlPublishBodyWithVariations(body, template.available_quantity || 1);
       }
     }
 
@@ -4687,6 +4719,7 @@ app.post('/api/ml/templates/publish-bulk', async (req, res) => {
 
       let title = template.title || '';
       if (title.length > 60) title = title.substring(0, 60);
+      const familyNameBulk = String(template.title || '').trim().substring(0, 255) || title;
 
       const publishAttrs = attributes.filter(a => {
         if (['ITEM_CONDITION'].includes(a.id)) return false;
@@ -4705,6 +4738,7 @@ app.post('/api/ml/templates/publish-bulk', async (req, res) => {
         pictures: pictures.map(p => ({ source: p.source })),
         attributes: publishAttrs,
       };
+      if (familyNameBulk) body.family_name = familyNameBulk;
       if (variations.length > 0) {
         const validVariations = variations.filter(v =>
           v.attribute_combinations && v.attribute_combinations.length > 0
@@ -4720,7 +4754,7 @@ app.post('/api/ml/templates/publish-bulk', async (req, res) => {
             ...(v.seller_custom_field ? { seller_custom_field: v.seller_custom_field } : {}),
             ...(v.attributes && v.attributes.length > 0 ? { attributes: v.attributes.filter(a => a.id && (a.value_name || a.value_id)) } : {})
           }));
-          delete body.available_quantity;
+          finalizeMlPublishBodyWithVariations(body, template.available_quantity || 1);
         }
       }
       if (saleTerms.length > 0) {
@@ -4933,6 +4967,59 @@ app.get('/api/ad-models/enriched', async (req, res) => {
   }
 });
 
+app.get('/api/package-presets', (req, res) => {
+  db.all('SELECT id, name, width_cm, height_cm, depth_cm, weight_kg, created_at FROM package_presets ORDER BY name COLLATE NOCASE', (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json({ presets: rows || [] });
+  });
+});
+
+app.post('/api/package-presets', (req, res) => {
+  const { name, width_cm, height_cm, depth_cm, weight_kg } = req.body;
+  const n = (name || '').trim();
+  if (!n) return res.status(400).json({ error: 'Nome obrigatório' });
+  const w = Number(width_cm);
+  const h = Number(height_cm);
+  const d = Number(depth_cm);
+  const kg = Number(weight_kg);
+  if (![w, h, d, kg].every((x) => Number.isFinite(x) && x > 0)) {
+    return res.status(400).json({ error: 'Largura, altura, profundidade (cm) e peso (kg) devem ser números positivos' });
+  }
+  db.run('INSERT INTO package_presets (name, width_cm, height_cm, depth_cm, weight_kg) VALUES (?,?,?,?,?)',
+    [n, w, h, d, kg], function(err) {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ success: true, id: this.lastID });
+    });
+});
+
+app.put('/api/package-presets/:id', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const { name, width_cm, height_cm, depth_cm, weight_kg } = req.body;
+  const n = (name || '').trim();
+  if (!n) return res.status(400).json({ error: 'Nome obrigatório' });
+  const w = Number(width_cm);
+  const h = Number(height_cm);
+  const d = Number(depth_cm);
+  const kg = Number(weight_kg);
+  if (![w, h, d, kg].every((x) => Number.isFinite(x) && x > 0)) {
+    return res.status(400).json({ error: 'Medidas inválidas' });
+  }
+  db.run('UPDATE package_presets SET name = ?, width_cm = ?, height_cm = ?, depth_cm = ?, weight_kg = ? WHERE id = ?',
+    [n, w, h, d, kg, id], function(err) {
+      if (err) return res.status(500).json({ error: err.message });
+      if (!this.changes) return res.status(404).json({ error: 'Preset não encontrado' });
+      res.json({ success: true });
+    });
+});
+
+app.delete('/api/package-presets/:id', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  db.run('DELETE FROM package_presets WHERE id = ?', [id], function(err) {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json({ success: true, deleted: this.changes });
+  });
+});
+
 app.get('/api/ad-models/:id', (req, res) => {
   db.get('SELECT * FROM ad_models WHERE id = ?', [req.params.id], (err, row) => {
     if (err) return res.status(500).json({ error: err.message });
@@ -4947,12 +5034,12 @@ app.get('/api/ad-models/:id', (req, res) => {
 app.post('/api/ad-models', (req, res) => {
   const { sku, ean, title, category_id, category_name, price, currency_id, condition, buying_mode, listing_type_id,
     available_quantity, pictures, attributes, variations, description, shipping, sale_terms, video_id,
-    inventory_id, source_ml_item_id, source_account_id } = req.body;
+    inventory_id, source_ml_item_id, source_account_id, package_measures } = req.body;
   if (!title) return res.status(400).json({ error: 'Título obrigatório' });
   db.run(`INSERT INTO ad_models (inventory_id, sku, ean, title, category_id, category_name, price, currency_id, condition, buying_mode,
     listing_type_id, available_quantity, pictures, attributes, variations, description, shipping, sale_terms, video_id,
-    source_ml_item_id, source_account_id)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    source_ml_item_id, source_account_id, package_measures)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [inventory_id || null, sku || null, ean || null, title, category_id || null, category_name || null,
       price || 0, currency_id || 'BRL', condition || 'new', buying_mode || 'buy_it_now',
       listing_type_id || 'gold_special', available_quantity || 1,
@@ -4961,7 +5048,8 @@ app.post('/api/ad-models', (req, res) => {
       typeof variations === 'object' ? JSON.stringify(variations) : (variations || '[]'),
       description || '', typeof shipping === 'object' ? JSON.stringify(shipping) : (shipping || null),
       typeof sale_terms === 'object' ? JSON.stringify(sale_terms) : (sale_terms || '[]'),
-      video_id || null, source_ml_item_id || null, source_account_id || null],
+      video_id || null, source_ml_item_id || null, source_account_id || null,
+      package_measures != null ? (typeof package_measures === 'object' ? JSON.stringify(package_measures) : package_measures) : null],
     function(err) {
       if (err) {
         if (err.message.includes('UNIQUE constraint')) return res.status(409).json({ error: 'Já existe um modelo com esse SKU' });
@@ -5051,13 +5139,16 @@ app.put('/api/ad-models/:id', (req, res) => {
   const id = parseInt(req.params.id, 10);
   const fields = ['sku', 'ean', 'title', 'category_id', 'category_name', 'price', 'currency_id', 'condition', 'buying_mode',
     'listing_type_id', 'available_quantity', 'pictures', 'attributes', 'variations', 'description',
-    'shipping', 'sale_terms', 'video_id', 'inventory_id'];
+    'shipping', 'sale_terms', 'video_id', 'inventory_id', 'package_measures'];
   const updates = [];
   const params = [];
   for (const f of fields) {
     if (req.body[f] !== undefined) {
       updates.push(`${f} = ?`);
-      params.push(typeof req.body[f] === 'object' ? JSON.stringify(req.body[f]) : req.body[f]);
+      const val = req.body[f];
+      if (val === null) params.push(null);
+      else if (typeof val === 'object') params.push(JSON.stringify(val));
+      else params.push(val);
     }
   }
   if (!updates.length) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
@@ -5094,6 +5185,138 @@ app.delete('/api/ad-models', (req, res) => {
   });
 });
 
+/** picture_ids no modelo: índices 0..n-1 na lista de fotos ou ids importados do ML — normaliza para índices (API aceita na criação). */
+function normalizeAdModelVariationPictureIds(variations, pictures) {
+  const pics = Array.isArray(pictures) ? pictures : [];
+  const len = pics.length;
+  return (variations || []).map((v) => {
+    const raw = v.picture_ids || [];
+    const resolved = [];
+    for (const pid of raw) {
+      const n = Number(pid);
+      if (Number.isInteger(n) && n >= 0 && n < len) {
+        resolved.push(n);
+        continue;
+      }
+      const idx = pics.findIndex((p) => p && p.id != null && String(p.id) === String(pid));
+      if (idx >= 0) resolved.push(idx);
+    }
+    return { ...v, picture_ids: [...new Set(resolved)] };
+  });
+}
+
+function mapSaleTermsForMlBody(saleTerms) {
+  return (saleTerms || [])
+    .filter((t) => t && t.id && (t.value_id || (t.value_name != null && String(t.value_name).trim() !== '')))
+    .map((t) => ({
+      id: t.id,
+      ...(t.value_id ? { value_id: t.value_id } : {}),
+      ...(t.value_name != null && String(t.value_name).trim() !== '' ? { value_name: t.value_name } : {}),
+    }));
+}
+
+/** Vendedores sem User Products: array variations; family_name não pode ir junto; available_quantity no item = soma das variações. */
+function finalizeMlPublishBodyWithVariations(body, effectiveQtyFallback) {
+  const vars = body.variations;
+  if (!Array.isArray(vars) || vars.length === 0) return;
+  delete body.family_name;
+  const sum = vars.reduce((acc, v) => acc + (Number(v && v.available_quantity) || 0), 0);
+  const fb = Number(effectiveQtyFallback);
+  body.available_quantity = sum > 0 ? sum : (Number.isFinite(fb) && fb > 0 ? fb : 1);
+}
+
+function mlAttrToPayload(a) {
+  if (!a || !a.id) return null;
+  const o = { id: a.id };
+  if (a.value_id) o.value_id = a.value_id;
+  if (a.value_name != null && String(a.value_name).trim() !== '') o.value_name = a.value_name;
+  return o.value_id || o.value_name ? o : null;
+}
+
+/**
+ * Modo User Products: cada variação vira um POST /items separado. O array `attributes` do modelo
+ * costuma incluir SELLER_SKU do nível do item (estoque / SKU único); ao mesclar em todas as
+ * variações, o mesmo SKU ia para todos os anúncios. Importações do ML trazem SKU por variação
+ * em seller_custom_field / attributes da variação — não repetem esse atributo no item.
+ */
+function omitItemLevelSellerSkuForUserProductPosts(attrs) {
+  return (attrs || []).filter((a) => a && String(a.id || '') !== 'SELLER_SKU');
+}
+
+function mergeAttributesForMlUserProductVariation(publishAttrs, variation) {
+  const byId = new Map();
+  for (const a of publishAttrs || []) {
+    const p = mlAttrToPayload(a);
+    if (p) byId.set(p.id, p);
+  }
+  for (const ac of variation.attribute_combinations || []) {
+    if (!ac || !ac.id) continue;
+    const p = { id: ac.id };
+    if (ac.value_id) p.value_id = ac.value_id;
+    if (ac.value_name != null && String(ac.value_name).trim() !== '') p.value_name = ac.value_name;
+    if (p.value_id || p.value_name) byId.set(p.id, p);
+  }
+  for (const a of variation.attributes || []) {
+    const p = mlAttrToPayload(a);
+    if (p) byId.set(p.id, p);
+  }
+  return Array.from(byId.values());
+}
+
+/** Alinha atributo SELLER_SKU ao seller_custom_field da linha (evita divergência com merge). */
+function finalizeUserProductVariationAttributes(merged, variation) {
+  const sku = String(variation.seller_custom_field || '').trim();
+  if (!sku) return merged;
+  const rest = (merged || []).filter((a) => a && a.id !== 'SELLER_SKU');
+  rest.push({ id: 'SELLER_SKU', value_name: sku });
+  return rest;
+}
+
+function mlPicturesPayloadForVariation(pictures, variation) {
+  const pics = Array.isArray(pictures) ? pictures : [];
+  const all = pics.map(p => ({ source: p.source || p.secure_url }));
+  const ids = variation.picture_ids || [];
+  if (!ids.length) return all;
+  const picked = ids.map((i) => all[Number(i)]).filter(Boolean);
+  return picked.length ? picked : all;
+}
+
+/** Remove atributos de embalagem antigos ou duplicados (ML usa PACKAGE_* ou seller_package_* conforme categoria). */
+const ML_PACKAGE_ATTR_IDS = [
+  'PACKAGE_WIDTH', 'PACKAGE_HEIGHT', 'PACKAGE_LENGTH', 'PACKAGE_WEIGHT',
+  'seller_package_width', 'seller_package_height', 'seller_package_length', 'seller_package_weight',
+];
+
+function parseAdModelPackageMeasures(row) {
+  if (!row || row.package_measures == null || row.package_measures === '') return null;
+  try {
+    const o = typeof row.package_measures === 'string' ? JSON.parse(row.package_measures) : row.package_measures;
+    return o && typeof o === 'object' ? o : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Inclui atributos de embalagem no POST /items. Muitas categorias exigem seller_package_* (erro API se faltar). Dimensões em cm; peso em kg no modelo → gramas na API. */
+function applyPackageMeasuresToMlAttributes(attrs, packageMeasures) {
+  const pkgSet = new Set(ML_PACKAGE_ATTR_IDS);
+  const base = (attrs || []).filter((a) => a && !pkgSet.has(a.id));
+  if (!packageMeasures || packageMeasures.has_factory_packaging === false) return base;
+  const w = Number(packageMeasures.width_cm);
+  const h = Number(packageMeasures.height_cm);
+  const d = Number(packageMeasures.depth_cm);
+  const kg = Number(packageMeasures.weight_kg);
+  if (![w, h, d, kg].every((n) => Number.isFinite(n) && n > 0)) return base;
+  const grams = Math.max(1, Math.round(kg * 1000));
+  return [
+    ...base,
+    { id: 'seller_package_width', value_name: `${w} cm` },
+    { id: 'seller_package_height', value_name: `${h} cm` },
+    { id: 'seller_package_length', value_name: `${d} cm` },
+    { id: 'seller_package_weight', value_name: `${grams} g` },
+  ];
+}
+
 app.post('/api/ad-models/:id/publish', async (req, res) => {
   const id = parseInt(req.params.id, 10);
   const { marketplace, accountId, price: overridePrice, listing_type_id: overrideListingType,
@@ -5113,7 +5336,7 @@ app.post('/api/ad-models/:id/publish', async (req, res) => {
 
     const pictures = JSON.parse(model.pictures || '[]');
     const attributes = JSON.parse(model.attributes || '[]');
-    const variations = JSON.parse(model.variations || '[]');
+    let variations = normalizeAdModelVariationPictureIds(JSON.parse(model.variations || '[]'), pictures);
     const saleTerms = JSON.parse(model.sale_terms || '[]');
 
     const effectivePrice = overridePrice != null ? Number(overridePrice) : model.price;
@@ -5122,11 +5345,74 @@ app.post('/api/ad-models/:id/publish', async (req, res) => {
 
     let title = model.title || '';
     if (title.length > 60) title = title.substring(0, 60);
+    // User Products (ML): alguns vendedores/categorias exigem family_name no POST /items (erro body.required_fields)
+    const familyName = String(model.title || '').trim().substring(0, 255) || title;
 
-    const publishAttrs = attributes.filter(a => {
+    let publishAttrs = attributes.filter(a => {
       if (['ITEM_CONDITION'].includes(a.id)) return false;
       return a.value_id || a.value_name;
     });
+    publishAttrs = applyPackageMeasuresToMlAttributes(publishAttrs, parseAdModelPackageMeasures(model));
+
+    const validVariations = variations.filter(v => v.attribute_combinations && v.attribute_combinations.length > 0);
+
+    let isUpSeller = false;
+    try {
+      isUpSeller = await mlSellerIsUserProductSeller(accountId);
+    } catch (e) {
+      console.warn('[Ad Models] Não foi possível ler tags do vendedor ML:', e.message);
+    }
+
+    const publishAttrsUserProduct = omitItemLevelSellerSkuForUserProductPosts(publishAttrs);
+
+    if (validVariations.length > 0 && isUpSeller) {
+      const newResults = [];
+      for (let idx = 0; idx < validVariations.length; idx++) {
+        const v = validVariations[idx];
+        const varPrice = overrideVarPrices && overrideVarPrices[String(idx)] != null
+          ? Number(overrideVarPrices[String(idx)])
+          : (v.price || effectivePrice);
+        const bodyUp = {
+          family_name: familyName,
+          category_id: model.category_id,
+          price: varPrice,
+          currency_id: model.currency_id || 'BRL',
+          available_quantity: v.available_quantity || 1,
+          buying_mode: model.buying_mode || 'buy_it_now',
+          listing_type_id: effectiveListingType,
+          condition: model.condition || 'new',
+          pictures: mlPicturesPayloadForVariation(pictures, v),
+          attributes: finalizeUserProductVariationAttributes(
+            mergeAttributesForMlUserProductVariation(publishAttrsUserProduct, v),
+            v
+          ),
+        };
+        if (v.seller_custom_field) bodyUp.seller_custom_field = v.seller_custom_field;
+        if (saleTerms.length > 0) bodyUp.sale_terms = mapSaleTermsForMlBody(saleTerms);
+
+        console.log('[Ad Models] Publishing to ML (User Products):', JSON.stringify({ variant: idx + 1, total: validVariations.length, listing_type: effectiveListingType, price: varPrice }));
+        const result = await mlApiPost('/items', bodyUp, accountId);
+        newResults.push(result);
+        if (model.description) {
+          try { await mlApiPost(`/items/${result.id}/description`, { plain_text: model.description }, accountId); } catch {}
+        }
+        if (idx < validVariations.length - 1) await delay(400);
+      }
+
+      const first = newResults[0];
+      db.run(`INSERT OR REPLACE INTO ad_model_publications (ad_model_id, marketplace, account_id, published_item_id, status, published_at, published_price, published_listing_type)
+        VALUES (?, ?, ?, ?, 'published', CURRENT_TIMESTAMP, ?, ?)`,
+        [id, 'ml', accountId, first.id, effectivePrice, effectiveListingType]);
+
+      return res.json({
+        success: true,
+        newItemId: first.id,
+        permalink: first.permalink,
+        newItemIds: newResults.map(r => r.id),
+        permalinks: newResults.map(r => r.permalink),
+        userProductMode: true,
+      });
+    }
 
     const body = {
       title,
@@ -5137,8 +5423,9 @@ app.post('/api/ad-models/:id/publish', async (req, res) => {
       buying_mode: model.buying_mode || 'buy_it_now',
       listing_type_id: effectiveListingType,
       pictures: pictures.map(p => ({ source: p.source || p.secure_url })),
-      attributes: publishAttrs.map(a => ({ id: a.id, value_name: a.value_name })),
+      attributes: publishAttrs.map(a => ({ id: a.id, ...(a.value_id ? { value_id: a.value_id } : {}), ...(a.value_name ? { value_name: a.value_name } : {}) })),
     };
+    if (familyName) body.family_name = familyName;
 
     if (variations.length > 0) {
       body.variations = variations
@@ -5160,14 +5447,14 @@ app.post('/api/ad-models/:id/publish', async (req, res) => {
           }
           return varObj;
         });
-      if (body.variations.length > 0) delete body.available_quantity;
+      if (body.variations.length > 0) finalizeMlPublishBodyWithVariations(body, effectiveQty);
       else { body.available_quantity = effectiveQty; delete body.variations; }
     } else {
       body.available_quantity = effectiveQty;
     }
 
     if (saleTerms.length > 0) {
-      body.sale_terms = saleTerms.filter(t => t.value_id || t.value_name).map(t => ({ id: t.id, value_name: t.value_name }));
+      body.sale_terms = mapSaleTermsForMlBody(saleTerms);
     }
 
     console.log('[Ad Models] Publishing to ML:', JSON.stringify({ listing_type: effectiveListingType, price: effectivePrice, variations: body.variations?.length || 0 }));
@@ -5204,6 +5491,13 @@ app.post('/api/ad-models/bulk-publish', async (req, res) => {
   const results = { total: items.length, published: 0, errors: [] };
   const delay = ms => new Promise(r => setTimeout(r, ms));
 
+  let bulkIsUpSeller = false;
+  try {
+    bulkIsUpSeller = await mlSellerIsUserProductSeller(accountId);
+  } catch (e) {
+    console.warn('[Bulk Publish] Não foi possível ler tags do vendedor ML:', e.message);
+  }
+
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
     const { modelId, price: overridePrice, listing_type_id: overrideListingType,
@@ -5223,7 +5517,7 @@ app.post('/api/ad-models/bulk-publish', async (req, res) => {
 
       const pictures = JSON.parse(model.pictures || '[]');
       let attributes = JSON.parse(model.attributes || '[]');
-      const variations = JSON.parse(model.variations || '[]');
+      let variations = normalizeAdModelVariationPictureIds(JSON.parse(model.variations || '[]'), pictures);
       const saleTerms = JSON.parse(model.sale_terms || '[]');
 
       if (attribute_overrides && typeof attribute_overrides === 'object') {
@@ -5243,11 +5537,75 @@ app.post('/api/ad-models/bulk-publish', async (req, res) => {
 
       let title = model.title || '';
       if (title.length > 60) title = title.substring(0, 60);
+      const familyName = String(model.title || '').trim().substring(0, 255) || title;
 
-      const publishAttrs = attributes.filter(a => {
+      let publishAttrs = attributes.filter(a => {
         if (['ITEM_CONDITION'].includes(a.id)) return false;
         return a.value_id || a.value_name;
       });
+      publishAttrs = applyPackageMeasuresToMlAttributes(publishAttrs, parseAdModelPackageMeasures(model));
+
+      const validVariations = variations.filter(v => v.attribute_combinations && v.attribute_combinations.length > 0);
+
+      const publishAttrsUserProduct = omitItemLevelSellerSkuForUserProductPosts(publishAttrs);
+
+      if (validVariations.length > 0 && bulkIsUpSeller) {
+        const newResults = [];
+        for (let idx = 0; idx < validVariations.length; idx++) {
+          const v = validVariations[idx];
+          const varPrice = overrideVarPrices && overrideVarPrices[String(idx)] != null
+            ? Number(overrideVarPrices[String(idx)])
+            : (v.price || effectivePrice);
+          const bodyUp = {
+            family_name: familyName,
+            category_id: model.category_id,
+            price: varPrice,
+            currency_id: model.currency_id || 'BRL',
+            available_quantity: v.available_quantity || 1,
+            buying_mode: model.buying_mode || 'buy_it_now',
+            listing_type_id: effectiveListingType,
+            condition: model.condition || 'new',
+            pictures: mlPicturesPayloadForVariation(pictures, v),
+            attributes: finalizeUserProductVariationAttributes(
+              mergeAttributesForMlUserProductVariation(publishAttrsUserProduct, v),
+              v
+            ),
+          };
+          if (v.seller_custom_field) bodyUp.seller_custom_field = v.seller_custom_field;
+          if (saleTerms.length > 0) bodyUp.sale_terms = mapSaleTermsForMlBody(saleTerms);
+
+          let result;
+          let retries = 0;
+          while (retries <= 2) {
+            try {
+              result = await mlApiPost('/items', bodyUp, accountId);
+              break;
+            } catch (apiErr) {
+              if (apiErr.response?.status === 429 && retries < 2) {
+                retries++;
+                console.log(`[Bulk Publish] Rate limited, retry ${retries}/2 after 2s`);
+                await delay(2000);
+              } else {
+                throw apiErr;
+              }
+            }
+          }
+          newResults.push(result);
+          if (model.description) {
+            try { await mlApiPost(`/items/${result.id}/description`, { plain_text: model.description }, accountId); } catch {}
+          }
+          if (idx < validVariations.length - 1) await delay(400);
+        }
+
+        const first = newResults[0];
+        db.run(`INSERT OR REPLACE INTO ad_model_publications (ad_model_id, marketplace, account_id, published_item_id, status, published_at, published_price, published_listing_type)
+          VALUES (?, ?, ?, ?, 'published', CURRENT_TIMESTAMP, ?, ?)`,
+          [modelId, 'ml', accountId, first.id, effectivePrice, effectiveListingType]);
+
+        console.log(`[Bulk Publish] ${i + 1}/${items.length} - Model ${modelId} to ML (User Products, ${validVariations.length} itens)`);
+        results.published++;
+        continue;
+      }
 
       const body = {
         title,
@@ -5260,6 +5618,7 @@ app.post('/api/ad-models/bulk-publish', async (req, res) => {
         pictures: pictures.map(p => ({ source: p.source || p.secure_url })),
         attributes: publishAttrs.map(a => ({ id: a.id, ...(a.value_id ? { value_id: a.value_id } : {}), ...(a.value_name ? { value_name: a.value_name } : {}) })),
       };
+      if (familyName) body.family_name = familyName;
 
       if (variations.length > 0) {
         body.variations = variations
@@ -5281,14 +5640,14 @@ app.post('/api/ad-models/bulk-publish', async (req, res) => {
             }
             return varObj;
           });
-        if (body.variations.length > 0) delete body.available_quantity;
+        if (body.variations.length > 0) finalizeMlPublishBodyWithVariations(body, effectiveQty);
         else { body.available_quantity = effectiveQty; delete body.variations; }
       } else {
         body.available_quantity = effectiveQty;
       }
 
       if (saleTerms.length > 0) {
-        body.sale_terms = saleTerms.filter(t => t.value_id || t.value_name).map(t => ({ id: t.id, value_name: t.value_name }));
+        body.sale_terms = mapSaleTermsForMlBody(saleTerms);
       }
 
       console.log(`[Bulk Publish] ${i + 1}/${items.length} - Model ${modelId} to ML`);
@@ -9512,6 +9871,49 @@ app.get('/api/export/sales.xlsx', async (req, res) => {
 
 // ====== Upload de tabela de frete (XLSX/CSV)
 const upload = multer({ storage: multer.memoryStorage() });
+
+/** Fotos de modelo de anúncio — salvas em client/public/uploads (URL pública para o ML baixar na publicação). */
+const uploadAdModelPicture = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      const dir = path.join(__dirname, '../client/public/uploads');
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+      } catch (e) {
+        return cb(e);
+      }
+      cb(null, dir);
+    },
+    filename: (req, file, cb) => {
+      const ext = path.extname(file.originalname || '').toLowerCase();
+      const allowed = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
+      const extFinal = allowed.includes(ext) ? ext : '.jpg';
+      cb(null, `ml-${Date.now()}-${Math.random().toString(36).slice(2, 10)}${extFinal}`);
+    }
+  }),
+  limits: { fileSize: 8 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const m = (file.mimetype || '').toLowerCase();
+    if (m.startsWith('image/')) return cb(null, true);
+    cb(new Error('Envie apenas imagens (JPEG, PNG, GIF ou WebP)'));
+  }
+});
+
+app.post('/api/ad-models/upload-picture', (req, res) => {
+  uploadAdModelPicture.single('file')(req, res, (err) => {
+    if (err) return res.status(400).json({ error: err.message || 'Upload inválido' });
+    try {
+      if (!req.file) return res.status(400).json({ error: 'Arquivo não enviado' });
+      const proto = (req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0].trim();
+      const host = req.get('host') || 'localhost';
+      const url = `${proto}://${host}/uploads/${req.file.filename}`;
+      res.json({ url, path: `/uploads/${req.file.filename}`, filename: req.file.filename });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+});
+
 app.post('/api/reports/shipping-tables/upload', upload.single('file'), async (req, res) => {
   try {
     const { marketplace, name, rule_type } = req.body || {};

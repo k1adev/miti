@@ -46,3 +46,7 @@ Thumbs.db
 
 # Tokens / credenciais locais (não versionar)
 server/bling_token.json
+
+# Fotos enviadas para modelos de anúncio (servidas em /uploads)
+client/public/uploads/*
+!client/public/uploads/.gitkeep
