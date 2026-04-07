@@ -3364,14 +3364,13 @@ export const Sales = () => {
                       } catch { return a.data_criacao || '-'; }
                     })();
                     const mks = (a.marketplaces || '').split(',').map(s => s.trim()).filter(Boolean);
+                    const canaisLinha = mks.length ? mks.join(' - ') : '—';
                     return (
                       <div key={a.id} className="flex items-center justify-between gap-4 p-4 rounded-xl border border-gray-200 dark:border-gray-600 bg-gray-50/50 dark:bg-gray-700/30 hover:bg-gray-100/50 dark:hover:bg-gray-700/50 transition-colors">
                         <div className="min-w-0 flex-1">
-                          <div className="flex flex-wrap gap-2 mb-2">
-                            {mks.map((mk, i) => (
-                              <span key={i} className="px-3 py-1 rounded-lg text-sm font-semibold bg-blue-500 dark:bg-blue-600 text-white shadow-sm">{mk}</span>
-                            ))}
-                          </div>
+                          <p className="text-sm font-bold text-gray-900 dark:text-white mb-2 select-all cursor-text" title="Selecione e copie (Ctrl+C)">
+                            {canaisLinha}
+                          </p>
                           <div className="text-xs text-gray-500 dark:text-gray-400">{dataExibir}</div>
                         </div>
                         <div className="relative flex-shrink-0">

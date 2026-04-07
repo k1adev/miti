@@ -974,7 +974,10 @@ export const Anuncios = ({ user }) => {
       toast.success(`Publicado! Novo ID: ${r.data.newItemId}`);
       setModelPublishModal(null);
       fetchAdModels();
-    } catch (e) { toast.error(e.response?.data?.error || 'Erro ao publicar'); }
+    } catch (e) {
+      const d = e.response?.data;
+      toast.error(d?.error || d?.message || 'Erro ao publicar', { duration: 12000 });
+    }
     setModelPublishing(false);
   };
 
@@ -1044,7 +1047,8 @@ export const Anuncios = ({ user }) => {
         done: true,
         errors: [{ modelId: 0, error: e.response?.data?.error || e.message }],
       }));
-      toast.error(e.response?.data?.error || 'Erro ao publicar em massa');
+      const d = e.response?.data;
+      toast.error(d?.error || d?.message || 'Erro ao publicar em massa', { duration: 12000 });
     }
     setBulkPublishing(false);
   };
@@ -3513,7 +3517,12 @@ export const Anuncios = ({ user }) => {
                             {bulkProgress.errors.map((err, i) => (
                               <div key={i} className="px-3 py-2 border-b dark:border-gray-700/50 last:border-b-0">
                                 <p className="text-xs font-medium text-gray-900 dark:text-white">{err.title || `Modelo #${err.modelId}`}</p>
-                                <p className="text-[10px] text-red-600 dark:text-red-400 mt-0.5">{err.error}</p>
+                                <p className="text-[10px] text-red-600 dark:text-red-400 mt-0.5 whitespace-pre-wrap">{err.error}</p>
+                                {err.details?.cause?.length > 0 && (
+                                  <p className="text-[10px] text-gray-600 dark:text-gray-400 mt-1 font-mono break-all">
+                                    {JSON.stringify(err.details.cause)}
+                                  </p>
+                                )}
                               </div>
                             ))}
                           </div>

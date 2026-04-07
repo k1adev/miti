@@ -4667,6 +4667,8 @@ app.post('/api/ml/templates/:id/publish', async (req, res) => {
     }
     if (template.video_id) body.video_id = template.video_id;
 
+    mlStripTitleIfFamilyVariationListing(body);
+
     const result = await mlApiPost('/items', body, targetAccountId);
 
     db.run('UPDATE ml_item_templates SET status = ?, published_ml_item_id = ?, published_account_id = ?, error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
@@ -4761,6 +4763,8 @@ app.post('/api/ml/templates/publish-bulk', async (req, res) => {
         body.sale_terms = saleTerms.filter(t => t.value_id || t.value_name);
       }
       if (template.video_id) body.video_id = template.video_id;
+
+      mlStripTitleIfFamilyVariationListing(body);
 
       const result = await mlApiPost('/items', body, targetAccountId);
       db.run('UPDATE ml_item_templates SET status = ?, published_ml_item_id = ?, published_account_id = ?, error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
@@ -5205,6 +5209,79 @@ function normalizeAdModelVariationPictureIds(variations, pictures) {
   });
 }
 
+/** ML rejeita body.invalid_fields se price/qty forem string (comum vindo do SQLite). */
+function toMlPriceNumber(v) {
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+
+function toMlQuantityInt(v) {
+  const n = parseInt(String(v == null ? '' : v), 10);
+  return Number.isFinite(n) && n >= 0 ? n : 1;
+}
+
+/**
+ * POST /items: cada combinação deve ter só id, value_id, value_name (sem `name` etc.).
+ * @see https://developers.mercadolibre.com.ar/en_us/listing-types
+ */
+function sanitizeAttributeCombinationForMl(ac) {
+  if (!ac || !ac.id) return null;
+  const o = { id: String(ac.id) };
+  const vid = ac.value_id != null && String(ac.value_id).trim() !== '' ? String(ac.value_id) : null;
+  const vname = ac.value_name != null && String(ac.value_name).trim() !== '' ? String(ac.value_name).trim() : null;
+  if (!vid && !vname) return null;
+  if (vid) o.value_id = vid;
+  if (vname) o.value_name = vname;
+  return o;
+}
+
+function sanitizeAttributeCombinationsForMl(combos) {
+  return (combos || []).map(sanitizeAttributeCombinationForMl).filter(Boolean);
+}
+
+/**
+ * picture_ids no POST /items: índices 0..n-1 na lista `pictures` do mesmo body.
+ * NÃO usar parseInt em IDs ML ("553111-MLA...") — parseInt trunca em 553111 e corrompe o payload (body.invalid_fields).
+ */
+function sanitizeVariationPictureIds(raw, numPictures) {
+  const max = Number.isFinite(numPictures) && numPictures > 0 ? Math.floor(numPictures) : 12;
+  return (raw || [])
+    .map((x) => {
+      const s = String(x).trim();
+      if (!/^\d+$/.test(s)) return null;
+      const n = parseInt(s, 10);
+      if (Number.isInteger(n) && n >= 0 && n < max) return n;
+      return null;
+    })
+    .filter((n) => n != null);
+}
+
+/** Monta mensagem legível a partir de cause[] (body.invalid_fields costuma trazer referência ao campo). */
+function mlApiErrorToUserMessage(err) {
+  const data = err.response?.data || {};
+  const causes = Array.isArray(data.cause) ? data.cause : [];
+  const parts = causes
+    .filter((c) => !c.type || c.type === 'error')
+    .map((c) => {
+      if (typeof c === 'string') return c;
+      const ref = c.reference || (Array.isArray(c.references) ? c.references.join(', ') : c.references);
+      const msg = c.message || '';
+      if (ref && msg) return `${msg} [${ref}]`;
+      return msg || ref || '';
+    })
+    .filter(Boolean);
+  if (parts.length) return parts.join('; ');
+  const msg = data.message || err.message || 'Erro API Mercado Livre';
+  const errStr = typeof data.error === 'string' ? data.error.trim() : '';
+  if (errStr && errStr !== msg && !msg.includes(errStr)) {
+    return `${msg} — ${errStr}`;
+  }
+  if (msg === 'body.invalid_fields' && !parts.length) {
+    return `${msg}. Campos inválidos para esta categoria ou tipo de anúncio (atributos, frete, fotos). Confira category_id e atributos obrigatórios em /categories/$CATEGORY_ID/attributes.`;
+  }
+  return msg;
+}
+
 function mapSaleTermsForMlBody(saleTerms) {
   return (saleTerms || [])
     .filter((t) => t && t.id && (t.value_id || (t.value_name != null && String(t.value_name).trim() !== '')))
@@ -5215,14 +5292,21 @@ function mapSaleTermsForMlBody(saleTerms) {
     }));
 }
 
-/** Vendedores sem User Products: array variations; family_name não pode ir junto; available_quantity no item = soma das variações. */
+/** Anúncio com variações: soma available_quantity no item; mantém family_name (ML exige em muitas categorias / preço por variação). */
 function finalizeMlPublishBodyWithVariations(body, effectiveQtyFallback) {
   const vars = body.variations;
   if (!Array.isArray(vars) || vars.length === 0) return;
-  delete body.family_name;
   const sum = vars.reduce((acc, v) => acc + (Number(v && v.available_quantity) || 0), 0);
   const fb = Number(effectiveQtyFallback);
   body.available_quantity = sum > 0 ? sum : (Number.isFinite(fb) && fb > 0 ? fb : 1);
+}
+
+/** Com family_name + variations, o ML não aceita title no mesmo POST (body.invalid_fields [title]); título vem dos atributos/variações. */
+function mlStripTitleIfFamilyVariationListing(body) {
+  if (!body || !body.family_name) return;
+  if (Array.isArray(body.variations) && body.variations.length > 0) {
+    delete body.title;
+  }
 }
 
 function mlAttrToPayload(a) {
@@ -5274,11 +5358,31 @@ function finalizeUserProductVariationAttributes(merged, variation) {
 
 function mlPicturesPayloadForVariation(pictures, variation) {
   const pics = Array.isArray(pictures) ? pictures : [];
-  const all = pics.map(p => ({ source: p.source || p.secure_url }));
+  const all = pics.map(p => ({ source: p.source || p.secure_url })).filter((p) => p.source);
   const ids = variation.picture_ids || [];
   if (!ids.length) return all;
   const picked = ids.map((i) => all[Number(i)]).filter(Boolean);
   return picked.length ? picked : all;
+}
+
+/** Objeto shipping do item ML (JSON no modelo) para repostagem — evita body.invalid_fields por campos extras. */
+function mlShippingFromAdModelRow(row) {
+  if (!row || row.shipping == null || row.shipping === '') return null;
+  try {
+    const o = typeof row.shipping === 'string' ? JSON.parse(row.shipping) : row.shipping;
+    if (!o || typeof o !== 'object') return null;
+    const out = {};
+    if (o.mode != null && o.mode !== '') out.mode = o.mode;
+    if (o.free_shipping != null) out.free_shipping = !!o.free_shipping;
+    if (o.local_pick_up != null) out.local_pick_up = !!o.local_pick_up;
+    if (o.logistic_type != null && o.logistic_type !== '') out.logistic_type = o.logistic_type;
+    if (Array.isArray(o.tags)) out.tags = o.tags;
+    if (o.dimensions && typeof o.dimensions === 'object') out.dimensions = o.dimensions;
+    if (Array.isArray(o.methods)) out.methods = o.methods;
+    return Object.keys(out).length ? out : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Remove atributos de embalagem antigos ou duplicados (ML usa PACKAGE_* ou seller_package_* conforme categoria). */
@@ -5339,9 +5443,9 @@ app.post('/api/ad-models/:id/publish', async (req, res) => {
     let variations = normalizeAdModelVariationPictureIds(JSON.parse(model.variations || '[]'), pictures);
     const saleTerms = JSON.parse(model.sale_terms || '[]');
 
-    const effectivePrice = overridePrice != null ? Number(overridePrice) : model.price;
+    const effectivePrice = toMlPriceNumber(overridePrice != null ? overridePrice : model.price);
     const effectiveListingType = overrideListingType || model.listing_type_id || 'gold_special';
-    const effectiveQty = overrideQty != null ? Number(overrideQty) : (model.available_quantity || 1);
+    const effectiveQty = toMlQuantityInt(overrideQty != null ? overrideQty : model.available_quantity);
 
     let title = model.title || '';
     if (title.length > 60) title = title.substring(0, 60);
@@ -5369,15 +5473,17 @@ app.post('/api/ad-models/:id/publish', async (req, res) => {
       const newResults = [];
       for (let idx = 0; idx < validVariations.length; idx++) {
         const v = validVariations[idx];
-        const varPrice = overrideVarPrices && overrideVarPrices[String(idx)] != null
-          ? Number(overrideVarPrices[String(idx)])
-          : (v.price || effectivePrice);
+        const varPrice = toMlPriceNumber(
+          overrideVarPrices && overrideVarPrices[String(idx)] != null
+            ? overrideVarPrices[String(idx)]
+            : (v.price != null ? v.price : effectivePrice)
+        );
         const bodyUp = {
           family_name: familyName,
           category_id: model.category_id,
           price: varPrice,
           currency_id: model.currency_id || 'BRL',
-          available_quantity: v.available_quantity || 1,
+          available_quantity: toMlQuantityInt(v.available_quantity),
           buying_mode: model.buying_mode || 'buy_it_now',
           listing_type_id: effectiveListingType,
           condition: model.condition || 'new',
@@ -5389,6 +5495,11 @@ app.post('/api/ad-models/:id/publish', async (req, res) => {
         };
         if (v.seller_custom_field) bodyUp.seller_custom_field = v.seller_custom_field;
         if (saleTerms.length > 0) bodyUp.sale_terms = mapSaleTermsForMlBody(saleTerms);
+        const shipUp = mlShippingFromAdModelRow(model);
+        if (shipUp) bodyUp.shipping = shipUp;
+        if (model.video_id && String(model.video_id).trim() !== '' && String(model.video_id).toLowerCase() !== 'null') {
+          bodyUp.video_id = model.video_id;
+        }
 
         console.log('[Ad Models] Publishing to ML (User Products):', JSON.stringify({ variant: idx + 1, total: validVariations.length, listing_type: effectiveListingType, price: varPrice }));
         const result = await mlApiPost('/items', bodyUp, accountId);
@@ -5422,23 +5533,31 @@ app.post('/api/ad-models/:id/publish', async (req, res) => {
       condition: model.condition || 'new',
       buying_mode: model.buying_mode || 'buy_it_now',
       listing_type_id: effectiveListingType,
-      pictures: pictures.map(p => ({ source: p.source || p.secure_url })),
+      pictures: pictures.map(p => ({ source: p.source || p.secure_url })).filter((p) => p.source),
       attributes: publishAttrs.map(a => ({ id: a.id, ...(a.value_id ? { value_id: a.value_id } : {}), ...(a.value_name ? { value_name: a.value_name } : {}) })),
     };
     if (familyName) body.family_name = familyName;
+
+    const shipPost = mlShippingFromAdModelRow(model);
+    if (shipPost) body.shipping = shipPost;
+    if (model.video_id && String(model.video_id).trim() !== '' && String(model.video_id).toLowerCase() !== 'null') {
+      body.video_id = model.video_id;
+    }
 
     if (variations.length > 0) {
       body.variations = variations
         .filter(v => v.attribute_combinations && v.attribute_combinations.length > 0)
         .map((v, idx) => {
-          const varPrice = overrideVarPrices && overrideVarPrices[String(idx)] != null
-            ? Number(overrideVarPrices[String(idx)])
-            : (v.price || effectivePrice);
+          const varPrice = toMlPriceNumber(
+            overrideVarPrices && overrideVarPrices[String(idx)] != null
+              ? overrideVarPrices[String(idx)]
+              : (v.price != null ? v.price : effectivePrice)
+          );
           const varObj = {
-            attribute_combinations: v.attribute_combinations,
+            attribute_combinations: sanitizeAttributeCombinationsForMl(v.attribute_combinations),
             price: varPrice,
-            available_quantity: v.available_quantity || 1,
-            picture_ids: v.picture_ids || [],
+            available_quantity: toMlQuantityInt(v.available_quantity),
+            picture_ids: sanitizeVariationPictureIds(v.picture_ids, pictures.length),
           };
           if (v.seller_custom_field) varObj.seller_custom_field = v.seller_custom_field;
           if (v.attributes && v.attributes.length > 0) {
@@ -5457,6 +5576,8 @@ app.post('/api/ad-models/:id/publish', async (req, res) => {
       body.sale_terms = mapSaleTermsForMlBody(saleTerms);
     }
 
+    mlStripTitleIfFamilyVariationListing(body);
+
     console.log('[Ad Models] Publishing to ML:', JSON.stringify({ listing_type: effectiveListingType, price: effectivePrice, variations: body.variations?.length || 0 }));
     const result = await mlApiPost('/items', body, accountId);
 
@@ -5471,9 +5592,7 @@ app.post('/api/ad-models/:id/publish', async (req, res) => {
     res.json({ success: true, newItemId: result.id, permalink: result.permalink });
   } catch (err) {
     console.error('[Ad Models] Publish error:', err.response?.data || err.message);
-    const causes = err.response?.data?.cause || [];
-    const errorMessages = causes.filter(c => c.type === 'error').map(c => c.message).join('; ');
-    const errMsg = errorMessages || err.response?.data?.message || err.message;
+    const errMsg = mlApiErrorToUserMessage(err);
     db.run(`INSERT OR REPLACE INTO ad_model_publications (ad_model_id, marketplace, account_id, status, error_message)
       VALUES (?, ?, ?, 'error', ?)`, [id, 'ml', accountId, errMsg]);
     res.status(500).json({ error: errMsg, details: err.response?.data });
@@ -5531,9 +5650,9 @@ app.post('/api/ad-models/bulk-publish', async (req, res) => {
         }
       }
 
-      const effectivePrice = overridePrice != null ? Number(overridePrice) : model.price;
+      const effectivePrice = toMlPriceNumber(overridePrice != null ? overridePrice : model.price);
       const effectiveListingType = overrideListingType || model.listing_type_id || 'gold_special';
-      const effectiveQty = overrideQty != null ? Number(overrideQty) : (model.available_quantity || 1);
+      const effectiveQty = toMlQuantityInt(overrideQty != null ? overrideQty : model.available_quantity);
 
       let title = model.title || '';
       if (title.length > 60) title = title.substring(0, 60);
@@ -5553,15 +5672,17 @@ app.post('/api/ad-models/bulk-publish', async (req, res) => {
         const newResults = [];
         for (let idx = 0; idx < validVariations.length; idx++) {
           const v = validVariations[idx];
-          const varPrice = overrideVarPrices && overrideVarPrices[String(idx)] != null
-            ? Number(overrideVarPrices[String(idx)])
-            : (v.price || effectivePrice);
+          const varPrice = toMlPriceNumber(
+            overrideVarPrices && overrideVarPrices[String(idx)] != null
+              ? overrideVarPrices[String(idx)]
+              : (v.price != null ? v.price : effectivePrice)
+          );
           const bodyUp = {
             family_name: familyName,
             category_id: model.category_id,
             price: varPrice,
             currency_id: model.currency_id || 'BRL',
-            available_quantity: v.available_quantity || 1,
+            available_quantity: toMlQuantityInt(v.available_quantity),
             buying_mode: model.buying_mode || 'buy_it_now',
             listing_type_id: effectiveListingType,
             condition: model.condition || 'new',
@@ -5573,6 +5694,11 @@ app.post('/api/ad-models/bulk-publish', async (req, res) => {
           };
           if (v.seller_custom_field) bodyUp.seller_custom_field = v.seller_custom_field;
           if (saleTerms.length > 0) bodyUp.sale_terms = mapSaleTermsForMlBody(saleTerms);
+          const shipUpBulk = mlShippingFromAdModelRow(model);
+          if (shipUpBulk) bodyUp.shipping = shipUpBulk;
+          if (model.video_id && String(model.video_id).trim() !== '' && String(model.video_id).toLowerCase() !== 'null') {
+            bodyUp.video_id = model.video_id;
+          }
 
           let result;
           let retries = 0;
@@ -5615,23 +5741,31 @@ app.post('/api/ad-models/bulk-publish', async (req, res) => {
         condition: model.condition || 'new',
         buying_mode: model.buying_mode || 'buy_it_now',
         listing_type_id: effectiveListingType,
-        pictures: pictures.map(p => ({ source: p.source || p.secure_url })),
+        pictures: pictures.map(p => ({ source: p.source || p.secure_url })).filter((p) => p.source),
         attributes: publishAttrs.map(a => ({ id: a.id, ...(a.value_id ? { value_id: a.value_id } : {}), ...(a.value_name ? { value_name: a.value_name } : {}) })),
       };
       if (familyName) body.family_name = familyName;
+
+      const shipPostBulk = mlShippingFromAdModelRow(model);
+      if (shipPostBulk) body.shipping = shipPostBulk;
+      if (model.video_id && String(model.video_id).trim() !== '' && String(model.video_id).toLowerCase() !== 'null') {
+        body.video_id = model.video_id;
+      }
 
       if (variations.length > 0) {
         body.variations = variations
           .filter(v => v.attribute_combinations && v.attribute_combinations.length > 0)
           .map((v, idx) => {
-            const varPrice = overrideVarPrices && overrideVarPrices[String(idx)] != null
-              ? Number(overrideVarPrices[String(idx)])
-              : (v.price || effectivePrice);
+            const varPrice = toMlPriceNumber(
+              overrideVarPrices && overrideVarPrices[String(idx)] != null
+                ? overrideVarPrices[String(idx)]
+                : (v.price != null ? v.price : effectivePrice)
+            );
             const varObj = {
-              attribute_combinations: v.attribute_combinations,
+              attribute_combinations: sanitizeAttributeCombinationsForMl(v.attribute_combinations),
               price: varPrice,
-              available_quantity: v.available_quantity || 1,
-              picture_ids: v.picture_ids || [],
+              available_quantity: toMlQuantityInt(v.available_quantity),
+              picture_ids: sanitizeVariationPictureIds(v.picture_ids, pictures.length),
             };
             if (v.seller_custom_field) varObj.seller_custom_field = v.seller_custom_field;
             if (v.attributes && v.attributes.length > 0) {
@@ -5649,6 +5783,8 @@ app.post('/api/ad-models/bulk-publish', async (req, res) => {
       if (saleTerms.length > 0) {
         body.sale_terms = mapSaleTermsForMlBody(saleTerms);
       }
+
+      mlStripTitleIfFamilyVariationListing(body);
 
       console.log(`[Bulk Publish] ${i + 1}/${items.length} - Model ${modelId} to ML`);
 
@@ -5680,12 +5816,15 @@ app.post('/api/ad-models/bulk-publish', async (req, res) => {
       results.published++;
     } catch (err) {
       console.error(`[Bulk Publish] Error model ${modelId}:`, err.response?.data || err.message);
-      const causes = err.response?.data?.cause || [];
-      const errorMessages = causes.filter(c => c.type === 'error').map(c => c.message).join('; ');
-      const errMsg = errorMessages || err.response?.data?.message || err.message;
+      const errMsg = mlApiErrorToUserMessage(err);
       db.run(`INSERT OR REPLACE INTO ad_model_publications (ad_model_id, marketplace, account_id, status, error_message)
         VALUES (?, ?, ?, 'error', ?)`, [modelId, 'ml', accountId, errMsg]);
-      results.errors.push({ modelId, title: item.title || `#${modelId}`, error: errMsg });
+      results.errors.push({
+        modelId,
+        title: item.title || `#${modelId}`,
+        error: errMsg,
+        details: err.response?.data,
+      });
     }
   }
 
