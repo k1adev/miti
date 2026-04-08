@@ -4615,7 +4615,7 @@ app.post('/api/ml/templates/:id/publish', async (req, res) => {
 
     let title = template.title || '';
     if (title.length > 60) title = title.substring(0, 60);
-    const familyNameTpl = String(template.title || '').trim().substring(0, 255) || title;
+    const familyNameTpl = trimMlItemFamilyName(String(template.title || '').trim()) || trimMlItemFamilyName(title) || '';
 
     const publishAttrs = attributes.filter(a => {
       if (['ITEM_CONDITION'].includes(a.id)) return false;
@@ -4657,8 +4657,12 @@ app.post('/api/ml/templates/:id/publish', async (req, res) => {
             variation.attributes = v.attributes.filter(a => a.id && (a.value_name || a.value_id));
           }
           return variation;
-        });
-        finalizeMlPublishBodyWithVariations(body, template.available_quantity || 1);
+        }).filter(v => v.attribute_combinations && v.attribute_combinations.length > 0);
+        if (body.variations.length > 0) {
+          finalizeMlPublishBodyWithVariations(body, template.available_quantity || 1);
+        } else {
+          delete body.variations;
+        }
       }
     }
 
@@ -4667,7 +4671,7 @@ app.post('/api/ml/templates/:id/publish', async (req, res) => {
     }
     if (template.video_id) body.video_id = template.video_id;
 
-    mlStripTitleIfFamilyVariationListing(body);
+    mlFinalizeMlItemPostBody(body);
 
     const result = await mlApiPost('/items', body, targetAccountId);
 
@@ -4721,7 +4725,7 @@ app.post('/api/ml/templates/publish-bulk', async (req, res) => {
 
       let title = template.title || '';
       if (title.length > 60) title = title.substring(0, 60);
-      const familyNameBulk = String(template.title || '').trim().substring(0, 255) || title;
+      const familyNameBulk = trimMlItemFamilyName(String(template.title || '').trim()) || trimMlItemFamilyName(title) || '';
 
       const publishAttrs = attributes.filter(a => {
         if (['ITEM_CONDITION'].includes(a.id)) return false;
@@ -4755,8 +4759,12 @@ app.post('/api/ml/templates/publish-bulk', async (req, res) => {
             picture_ids: v.picture_ids || [],
             ...(v.seller_custom_field ? { seller_custom_field: v.seller_custom_field } : {}),
             ...(v.attributes && v.attributes.length > 0 ? { attributes: v.attributes.filter(a => a.id && (a.value_name || a.value_id)) } : {})
-          }));
-          finalizeMlPublishBodyWithVariations(body, template.available_quantity || 1);
+          })).filter(v => v.attribute_combinations && v.attribute_combinations.length > 0);
+          if (body.variations.length > 0) {
+            finalizeMlPublishBodyWithVariations(body, template.available_quantity || 1);
+          } else {
+            delete body.variations;
+          }
         }
       }
       if (saleTerms.length > 0) {
@@ -4764,7 +4772,7 @@ app.post('/api/ml/templates/publish-bulk', async (req, res) => {
       }
       if (template.video_id) body.video_id = template.video_id;
 
-      mlStripTitleIfFamilyVariationListing(body);
+      mlFinalizeMlItemPostBody(body);
 
       const result = await mlApiPost('/items', body, targetAccountId);
       db.run('UPDATE ml_item_templates SET status = ?, published_ml_item_id = ?, published_account_id = ?, error_message = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
@@ -5292,6 +5300,80 @@ function mapSaleTermsForMlBody(saleTerms) {
     }));
 }
 
+/** ML POST /items: family_name máximo 60 caracteres (erro item.family_name.length_invalid). */
+const ML_ITEM_FAMILY_NAME_MAX = 60;
+
+function trimMlItemFamilyName(value) {
+  const s = String(value == null ? '' : value).trim();
+  if (!s) return '';
+  return s.length <= ML_ITEM_FAMILY_NAME_MAX ? s : s.substring(0, ML_ITEM_FAMILY_NAME_MAX);
+}
+
+const mlCategoryAttributesCache = new Map();
+
+async function fetchMlCategoryAttributesPublic(categoryId) {
+  if (!categoryId) return [];
+  const cached = mlCategoryAttributesCache.get(categoryId);
+  if (cached && Date.now() - cached.at < 30 * 60 * 1000) return cached.data;
+  const resp = await axios.get(
+    `https://api.mercadolibre.com/categories/${encodeURIComponent(categoryId)}/attributes`,
+    { timeout: 15000 }
+  );
+  const data = Array.isArray(resp.data) ? resp.data : [];
+  mlCategoryAttributesCache.set(categoryId, { at: Date.now(), data });
+  return data;
+}
+
+function mlAttrDefsRequiredForListing(categoryAttrs) {
+  return (categoryAttrs || []).filter(
+    (a) => a && a.id && a.tags && (a.tags.required === true || a.tags.catalog_required === true)
+  );
+}
+
+function collectPresentAttrIdsFromPublishModel(publishAttrs, variations) {
+  const ids = new Set();
+  const addVal = (a) => {
+    if (!a || !a.id) return;
+    const hasVal =
+      (a.value_id != null && String(a.value_id).trim() !== '') ||
+      (a.value_name != null && String(a.value_name).trim() !== '');
+    if (hasVal) ids.add(a.id);
+  };
+  for (const a of publishAttrs || []) addVal(a);
+  for (const v of variations || []) {
+    for (const a of v.attributes || []) addVal(a);
+    for (const ac of v.attribute_combinations || []) {
+      if (ac && ac.id) {
+        const hasVal =
+          (ac.value_id != null && String(ac.value_id).trim() !== '') ||
+          (ac.value_name != null && String(ac.value_name).trim() !== '');
+        if (hasVal) ids.add(ac.id);
+      }
+    }
+  }
+  return ids;
+}
+
+/** Valida atributos obrigatórios (tags.required) da categoria antes do POST /items (evita item.attributes.missing_required). */
+async function mlValidateRequiredAttributesForPublish(categoryId, publishAttrs, variations) {
+  if (!categoryId) return { ok: true };
+  try {
+    const defs = await fetchMlCategoryAttributesPublic(categoryId);
+    const required = mlAttrDefsRequiredForListing(defs);
+    if (required.length === 0) return { ok: true };
+    const present = collectPresentAttrIdsFromPublishModel(publishAttrs, variations);
+    const missing = required.filter((r) => !present.has(r.id));
+    if (missing.length === 0) return { ok: true };
+    return {
+      ok: false,
+      missing: missing.map((m) => ({ id: m.id, name: m.name || m.id })),
+    };
+  } catch (e) {
+    console.warn('[ML] Não foi possível validar atributos obrigatórios da categoria:', e.message);
+    return { ok: true };
+  }
+}
+
 /** Anúncio com variações: soma available_quantity no item; mantém family_name (ML exige em muitas categorias / preço por variação). */
 function finalizeMlPublishBodyWithVariations(body, effectiveQtyFallback) {
   const vars = body.variations;
@@ -5301,12 +5383,21 @@ function finalizeMlPublishBodyWithVariations(body, effectiveQtyFallback) {
   body.available_quantity = sum > 0 ? sum : (Number.isFinite(fb) && fb > 0 ? fb : 1);
 }
 
-/** Com family_name + variations, o ML não aceita title no mesmo POST (body.invalid_fields [title]); título vem dos atributos/variações. */
-function mlStripTitleIfFamilyVariationListing(body) {
-  if (!body || !body.family_name) return;
-  if (Array.isArray(body.variations) && body.variations.length > 0) {
-    delete body.title;
+/**
+ * POST /items — contas em preço por variação / família de produto:
+ * - Exigem `family_name` (body.required_fields) e rejeitam `title` no mesmo body (body.invalid_fields [title]).
+ * - Documentação ML (User Products): não enviar title; o site monta o título a partir de atributos.
+ * Garante family_name a partir do title do body se faltar; remove sempre `title` antes do POST.
+ */
+function mlFinalizeMlItemPostBody(body) {
+  if (!body) return;
+  let fn = body.family_name != null ? String(body.family_name).trim() : '';
+  if (!fn) {
+    const t = body.title != null ? String(body.title).trim() : '';
+    fn = t || 'Produto';
   }
+  body.family_name = trimMlItemFamilyName(fn) || 'Produto';
+  delete body.title;
 }
 
 function mlAttrToPayload(a) {
@@ -5449,8 +5540,8 @@ app.post('/api/ad-models/:id/publish', async (req, res) => {
 
     let title = model.title || '';
     if (title.length > 60) title = title.substring(0, 60);
-    // User Products (ML): alguns vendedores/categorias exigem family_name no POST /items (erro body.required_fields)
-    const familyName = String(model.title || '').trim().substring(0, 255) || title;
+    // User Products (ML): family_name obrigatório; máx. 60 chars (item.family_name.length_invalid)
+    const familyName = trimMlItemFamilyName(String(model.title || '').trim()) || trimMlItemFamilyName(title) || 'Produto';
 
     let publishAttrs = attributes.filter(a => {
       if (['ITEM_CONDITION'].includes(a.id)) return false;
@@ -5459,6 +5550,16 @@ app.post('/api/ad-models/:id/publish', async (req, res) => {
     publishAttrs = applyPackageMeasuresToMlAttributes(publishAttrs, parseAdModelPackageMeasures(model));
 
     const validVariations = variations.filter(v => v.attribute_combinations && v.attribute_combinations.length > 0);
+
+    const reqAttrCheck = await mlValidateRequiredAttributesForPublish(model.category_id, publishAttrs, variations);
+    if (!reqAttrCheck.ok) {
+      const list = reqAttrCheck.missing.map((m) => `${m.name} (${m.id})`).join(', ');
+      return res.status(400).json({
+        error: `Faltam atributos obrigatórios Mercado Livre para esta categoria: ${list}. Edite o modelo e preencha na ficha técnica (atributos do item ou importe um anúncio ML completo).`,
+        missingAttributes: reqAttrCheck.missing,
+        category_id: model.category_id,
+      });
+    }
 
     let isUpSeller = false;
     try {
@@ -5565,7 +5666,8 @@ app.post('/api/ad-models/:id/publish', async (req, res) => {
               .map(a => ({ id: a.id, ...(a.value_id ? { value_id: a.value_id } : {}), ...(a.value_name ? { value_name: a.value_name } : {}) }));
           }
           return varObj;
-        });
+        })
+        .filter(v => v.attribute_combinations && v.attribute_combinations.length > 0);
       if (body.variations.length > 0) finalizeMlPublishBodyWithVariations(body, effectiveQty);
       else { body.available_quantity = effectiveQty; delete body.variations; }
     } else {
@@ -5576,7 +5678,7 @@ app.post('/api/ad-models/:id/publish', async (req, res) => {
       body.sale_terms = mapSaleTermsForMlBody(saleTerms);
     }
 
-    mlStripTitleIfFamilyVariationListing(body);
+    mlFinalizeMlItemPostBody(body);
 
     console.log('[Ad Models] Publishing to ML:', JSON.stringify({ listing_type: effectiveListingType, price: effectivePrice, variations: body.variations?.length || 0 }));
     const result = await mlApiPost('/items', body, accountId);
@@ -5656,7 +5758,7 @@ app.post('/api/ad-models/bulk-publish', async (req, res) => {
 
       let title = model.title || '';
       if (title.length > 60) title = title.substring(0, 60);
-      const familyName = String(model.title || '').trim().substring(0, 255) || title;
+      const familyName = trimMlItemFamilyName(String(model.title || '').trim()) || trimMlItemFamilyName(title) || 'Produto';
 
       let publishAttrs = attributes.filter(a => {
         if (['ITEM_CONDITION'].includes(a.id)) return false;
@@ -5665,6 +5767,20 @@ app.post('/api/ad-models/bulk-publish', async (req, res) => {
       publishAttrs = applyPackageMeasuresToMlAttributes(publishAttrs, parseAdModelPackageMeasures(model));
 
       const validVariations = variations.filter(v => v.attribute_combinations && v.attribute_combinations.length > 0);
+
+      const reqAttrCheck = await mlValidateRequiredAttributesForPublish(model.category_id, publishAttrs, variations);
+      if (!reqAttrCheck.ok) {
+        const list = reqAttrCheck.missing.map((m) => `${m.name} (${m.id})`).join(', ');
+        const errMsg = `Faltam atributos obrigatórios Mercado Livre para esta categoria: ${list}. Edite o modelo e preencha na ficha técnica.`;
+        results.errors.push({
+          modelId,
+          title: item.title || `#${modelId}`,
+          error: errMsg,
+          missingAttributes: reqAttrCheck.missing,
+          category_id: model.category_id,
+        });
+        continue;
+      }
 
       const publishAttrsUserProduct = omitItemLevelSellerSkuForUserProductPosts(publishAttrs);
 
@@ -5773,7 +5889,8 @@ app.post('/api/ad-models/bulk-publish', async (req, res) => {
                 .map(a => ({ id: a.id, ...(a.value_id ? { value_id: a.value_id } : {}), ...(a.value_name ? { value_name: a.value_name } : {}) }));
             }
             return varObj;
-          });
+          })
+          .filter(v => v.attribute_combinations && v.attribute_combinations.length > 0);
         if (body.variations.length > 0) finalizeMlPublishBodyWithVariations(body, effectiveQty);
         else { body.available_quantity = effectiveQty; delete body.variations; }
       } else {
@@ -5784,7 +5901,7 @@ app.post('/api/ad-models/bulk-publish', async (req, res) => {
         body.sale_terms = mapSaleTermsForMlBody(saleTerms);
       }
 
-      mlStripTitleIfFamilyVariationListing(body);
+      mlFinalizeMlItemPostBody(body);
 
       console.log(`[Bulk Publish] ${i + 1}/${items.length} - Model ${modelId} to ML`);
 

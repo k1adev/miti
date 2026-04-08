@@ -323,6 +323,29 @@ export const Anuncios = ({ user }) => {
     return () => { cancelled = true; };
   }, [modelEditModal?.category_id]);
 
+  /** Insere na ficha técnica os atributos obrigatórios da categoria ML que ainda não existem (ex.: MATERIALS, INCLUDES_BULBS). */
+  useEffect(() => {
+    if (!modelEditModal?.category_id) return;
+    if (!Array.isArray(modelCategorySchema) || modelCategorySchema.length === 0) return;
+    const required = modelCategorySchema.filter(
+      (a) => a && a.id && a.tags && (a.tags.required === true || a.tags.catalog_required === true)
+    );
+    if (required.length === 0) return;
+    setModelEditModal((prev) => {
+      if (!prev) return prev;
+      const attrs = [...(prev._attributes || [])];
+      const ids = new Set(attrs.map((x) => x.id));
+      let changed = false;
+      for (const def of required) {
+        if (!def.id || ids.has(def.id)) continue;
+        attrs.push({ id: def.id, name: def.name, value_name: '', value_id: null });
+        ids.add(def.id);
+        changed = true;
+      }
+      return changed ? { ...prev, _attributes: attrs } : prev;
+    });
+  }, [modelCategorySchema, modelEditModal?.category_id]);
+
   useEffect(() => {
     if (!modelEditModal) return;
     setModelAttrFilter('all');
@@ -404,10 +427,10 @@ export const Anuncios = ({ user }) => {
   }, [modelEditModal?._variations, variationNestedSplit, modelEditModal]);
 
   const modelAttrAnalysis = useMemo(() => {
-    if (!modelEditModal?._attributes?.length) {
+    if (!modelEditModal) {
       return { rows: [], missingCount: 0 };
     }
-    const attrs = modelEditModal._attributes;
+    const attrs = modelEditModal._attributes || [];
     const schemaArr = Array.isArray(modelCategorySchema) ? modelCategorySchema : [];
     const schemaById = {};
     for (const d of schemaArr) {
@@ -2435,13 +2458,13 @@ export const Anuncios = ({ user }) => {
                 )}
               </div>
 
-              {(modelEditModal._attributes || []).length > 0 && (
+              {modelEditModal.category_id && (
                 <div className="space-y-3">
                   <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
                     <div>
-                      <label className="block text-sm font-semibold text-gray-800 dark:text-gray-200">Atributos ({modelEditModal._attributes.length})</label>
+                      <label className="block text-sm font-semibold text-gray-800 dark:text-gray-200">Ficha técnica — Atributos do item ({(modelEditModal._attributes || []).length})</label>
                       <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">
-                        Regras da categoria ML ({modelEditModal.category_id || '—'}). Campos obrigatórios vazios ficam em destaque. Atributos que o ML trata como <strong className="font-medium text-gray-600 dark:text-gray-300">eixo de variação</strong> (ex.: cor, voltagem, frequência/rotação) aparecem na secção <strong className="font-medium text-gray-600 dark:text-gray-300">Variações</strong> abaixo, em cada linha — não nesta lista.
+                        Campos obrigatórios da categoria ML (<span className="font-mono">{modelEditModal.category_id}</span>) são adicionados automaticamente quando faltam (ex.: <span className="font-mono">MATERIALS</span>, <span className="font-mono">INCLUDES_BULBS</span>). Preencha o valor em cada cartão. Atributos de <strong className="font-medium text-gray-600 dark:text-gray-300">variação</strong> (cor, voltagem, etc.) ficam na secção <strong className="font-medium text-gray-600 dark:text-gray-300">Variações</strong>.
                       </p>
                     </div>
                     {modelCategorySchemaLoading && (
@@ -2494,7 +2517,12 @@ export const Anuncios = ({ user }) => {
                   </div>
 
                   <div className="border border-gray-200 dark:border-gray-600 rounded-xl max-h-[min(36rem,62vh)] overflow-y-auto p-2 bg-gray-50/50 dark:bg-gray-900/20">
-                    {modelAttrFilteredRows.length === 0 ? (
+                    {modelCategorySchemaLoading && (modelEditModal._attributes || []).length === 0 ? (
+                      <div className="text-sm text-gray-500 text-center py-8 px-2 flex items-center justify-center gap-2">
+                        <RefreshCw className="w-4 h-4 animate-spin text-blue-500" />
+                        A carregar atributos da categoria…
+                      </div>
+                    ) : modelAttrFilteredRows.length === 0 ? (
                       <div className="text-sm text-gray-500 text-center py-6 space-y-2 px-2">
                         <p>Nenhum atributo do <strong className="font-medium text-gray-700 dark:text-gray-300">item</strong> para este filtro.</p>
                         {modelAttrSearch.trim() && modelVariationAxesMatchingSearch.length > 0 ? (
@@ -2512,6 +2540,17 @@ export const Anuncios = ({ user }) => {
                         {modelAttrFilteredRows.map((r) => {
                           const val = (r.attr.value_name || r.attr.value_id || '').toString();
                           const maxLen = r.def?.value_max_length;
+                          const listVals = r.def?.values;
+                          const hasList = Array.isArray(listVals) && listVals.length > 0;
+                          let selectVal = '';
+                          if (hasList) {
+                            if (r.attr.value_id != null && String(r.attr.value_id).trim() !== '') {
+                              selectVal = String(r.attr.value_id);
+                            } else {
+                              const byName = listVals.find((v) => v.name === r.attr.value_name);
+                              selectVal = byName ? String(byName.id) : '';
+                            }
+                          }
                           const inputBorder = r.issue
                             ? 'border-red-400 ring-1 ring-red-100 dark:ring-red-900/50'
                             : r.mlMandatory && !r.empty
@@ -2532,6 +2571,9 @@ export const Anuncios = ({ user }) => {
                                 <span className="text-xs font-semibold text-gray-900 dark:text-white leading-tight break-words">{r.displayName}</span>
                                 <span className="text-[9px] font-mono text-gray-400 dark:text-gray-500 shrink-0">{r.attr.id}</span>
                               </div>
+                              {r.def?.hint ? (
+                                <p className="text-[10px] text-gray-500 dark:text-gray-400 mb-1.5 leading-snug">{r.def.hint}</p>
+                              ) : null}
                               <div className="flex flex-wrap gap-1 mb-1.5">
                                 {r.ignored && (
                                   <span className="text-[9px] font-medium px-1 py-0.5 rounded bg-gray-200 dark:bg-gray-600 text-gray-600 dark:text-gray-300">Ignorado</span>
@@ -2546,24 +2588,53 @@ export const Anuncios = ({ user }) => {
                                   <span className="text-[9px] font-bold text-red-700 dark:text-red-400">Preencher</span>
                                 )}
                               </div>
-                              <input
-                                type="text"
-                                value={val}
-                                onChange={(e) => {
-                                  const u = [...modelEditModal._attributes];
-                                  u[r.index] = { ...u[r.index], value_name: e.target.value, value_id: null };
-                                  setModelEditModal((p) => ({ ...p, _attributes: u }));
-                                }}
-                                placeholder="Valor"
-                                maxLength={typeof maxLen === 'number' && maxLen > 0 ? maxLen : undefined}
-                                className={`w-full min-w-0 px-2 py-1.5 rounded-md text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white ${inputBorder}`}
-                              />
+                              {hasList ? (
+                                <select
+                                  value={selectVal}
+                                  onChange={(e) => {
+                                    const vid = e.target.value;
+                                    const u = [...modelEditModal._attributes];
+                                    const opt = listVals.find((v) => String(v.id) === String(vid));
+                                    u[r.index] = {
+                                      ...u[r.index],
+                                      value_id: vid || null,
+                                      value_name: opt ? opt.name : '',
+                                    };
+                                    setModelEditModal((p) => ({ ...p, _attributes: u }));
+                                  }}
+                                  className={`w-full min-w-0 px-2 py-1.5 rounded-md text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white ${inputBorder}`}
+                                >
+                                  <option value="">— Selecione —</option>
+                                  {listVals.map((v) => (
+                                    <option key={v.id} value={String(v.id)}>{v.name}</option>
+                                  ))}
+                                </select>
+                              ) : (
+                                <input
+                                  type="text"
+                                  value={val}
+                                  onChange={(e) => {
+                                    const u = [...modelEditModal._attributes];
+                                    u[r.index] = { ...u[r.index], value_name: e.target.value, value_id: null };
+                                    setModelEditModal((p) => ({ ...p, _attributes: u }));
+                                  }}
+                                  placeholder="Valor"
+                                  maxLength={typeof maxLen === 'number' && maxLen > 0 ? maxLen : undefined}
+                                  className={`w-full min-w-0 px-2 py-1.5 rounded-md text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white ${inputBorder}`}
+                                />
+                              )}
                               <div className="mt-1 text-[9px] text-gray-500 dark:text-gray-400 flex flex-wrap justify-between gap-x-2 gap-y-0">
                                 <span className="tabular-nums">
-                                  {typeof maxLen === 'number' && maxLen > 0 ? `${val.length}/${maxLen}` : val.length}
-                                  {r.def?.value_type ? (
-                                    <span className="text-gray-400 dark:text-gray-500"> · <span className="font-mono">{r.def.value_type}</span></span>
-                                  ) : null}
+                                  {hasList ? (
+                                    <span className="font-mono">lista ML</span>
+                                  ) : (
+                                    <>
+                                      {typeof maxLen === 'number' && maxLen > 0 ? `${val.length}/${maxLen}` : val.length}
+                                      {r.def?.value_type ? (
+                                        <span className="text-gray-400 dark:text-gray-500"> · <span className="font-mono">{r.def.value_type}</span></span>
+                                      ) : null}
+                                    </>
+                                  )}
                                 </span>
                               </div>
                             </div>
