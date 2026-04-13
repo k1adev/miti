@@ -28,13 +28,16 @@
   "author": "Apoli Team",
   "license": "MIT",
   "dependencies": {
+    "archiver": "^6.0.0",
     "axios": "^1.6.0",
     "bcryptjs": "^3.0.2",
+    "cheerio": "^1.0.0-rc.12",
     "cors": "^2.8.5",
     "csv-parser": "^3.0.0",
     "csv-writer": "^1.6.0",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
+    "form-data": "^4.0.5",
     "helmet": "^8.1.0",
     "html2canvas": "^1.4.1",
     "jsonwebtoken": "^9.0.2",
@@ -42,9 +45,7 @@
     "morgan": "^1.10.0",
     "multer": "^1.4.5-lts.1",
     "sqlite3": "^5.1.6",
-    "xlsx": "^0.18.5",
-    "cheerio": "^1.0.0-rc.12",
-    "archiver": "^6.0.0"
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",

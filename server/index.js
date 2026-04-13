@@ -5,6 +5,7 @@ const morgan = require('morgan');
 const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
 const axios = require('axios');
+const FormData = require('form-data');
 const cheerio = require('cheerio');
 const multer = require('multer');
 const xlsx = require('xlsx');
@@ -1351,6 +1352,9 @@ function initDatabase() {
       }
       if (cols && !cols.find(c => c.name === 'package_measures')) {
         db.run('ALTER TABLE ad_models ADD COLUMN package_measures TEXT');
+      }
+      if (cols && !cols.find(c => c.name === 'marketplace_mappings')) {
+        db.run('ALTER TABLE ad_models ADD COLUMN marketplace_mappings TEXT');
       }
     });
 
@@ -5046,12 +5050,12 @@ app.get('/api/ad-models/:id', (req, res) => {
 app.post('/api/ad-models', (req, res) => {
   const { sku, ean, title, category_id, category_name, price, currency_id, condition, buying_mode, listing_type_id,
     available_quantity, pictures, attributes, variations, description, shipping, sale_terms, video_id,
-    inventory_id, source_ml_item_id, source_account_id, package_measures } = req.body;
+    inventory_id, source_ml_item_id, source_account_id, package_measures, marketplace_mappings } = req.body;
   if (!title) return res.status(400).json({ error: 'Título obrigatório' });
   db.run(`INSERT INTO ad_models (inventory_id, sku, ean, title, category_id, category_name, price, currency_id, condition, buying_mode,
     listing_type_id, available_quantity, pictures, attributes, variations, description, shipping, sale_terms, video_id,
-    source_ml_item_id, source_account_id, package_measures)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    source_ml_item_id, source_account_id, package_measures, marketplace_mappings)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [inventory_id || null, sku || null, ean || null, title, category_id || null, category_name || null,
       price || 0, currency_id || 'BRL', condition || 'new', buying_mode || 'buy_it_now',
       listing_type_id || 'gold_special', available_quantity || 1,
@@ -5061,7 +5065,8 @@ app.post('/api/ad-models', (req, res) => {
       description || '', typeof shipping === 'object' ? JSON.stringify(shipping) : (shipping || null),
       typeof sale_terms === 'object' ? JSON.stringify(sale_terms) : (sale_terms || '[]'),
       video_id || null, source_ml_item_id || null, source_account_id || null,
-      package_measures != null ? (typeof package_measures === 'object' ? JSON.stringify(package_measures) : package_measures) : null],
+      package_measures != null ? (typeof package_measures === 'object' ? JSON.stringify(package_measures) : package_measures) : null,
+      marketplace_mappings != null ? (typeof marketplace_mappings === 'object' ? JSON.stringify(marketplace_mappings) : marketplace_mappings) : null],
     function(err) {
       if (err) {
         if (err.message.includes('UNIQUE constraint')) return res.status(409).json({ error: 'Já existe um modelo com esse SKU' });
@@ -5151,7 +5156,7 @@ app.put('/api/ad-models/:id', (req, res) => {
   const id = parseInt(req.params.id, 10);
   const fields = ['sku', 'ean', 'title', 'category_id', 'category_name', 'price', 'currency_id', 'condition', 'buying_mode',
     'listing_type_id', 'available_quantity', 'pictures', 'attributes', 'variations', 'description',
-    'shipping', 'sale_terms', 'video_id', 'inventory_id', 'package_measures'];
+    'shipping', 'sale_terms', 'video_id', 'inventory_id', 'package_measures', 'marketplace_mappings'];
   const updates = [];
   const params = [];
   for (const f of fields) {
@@ -5307,6 +5312,37 @@ function trimMlItemFamilyName(value) {
   const s = String(value == null ? '' : value).trim();
   if (!s) return '';
   return s.length <= ML_ITEM_FAMILY_NAME_MAX ? s : s.substring(0, ML_ITEM_FAMILY_NAME_MAX);
+}
+
+/** EAN na coluna ad_models.ean (ou EAN/UPC em attributes) → GTIN no POST /items; ML exige GTIN em várias categorias. */
+function mergeModelEanIntoGtinAttribute(publishAttrs, modelEan) {
+  const attrs = [...(publishAttrs || [])];
+  let digits = String(modelEan == null ? '' : modelEan).trim().replace(/\D/g, '');
+  if (!digits) {
+    const eanAttr = attrs.find(
+      (a) =>
+        a &&
+        (a.id === 'EAN' || a.id === 'UPC') &&
+        a.value_name != null &&
+        String(a.value_name).trim() !== '' &&
+        String(a.value_name).trim() !== '-1'
+    );
+    if (eanAttr) digits = String(eanAttr.value_name).replace(/\D/g, '');
+  }
+  if (!digits || digits.length < 8 || digits.length > 14) return publishAttrs;
+  const idx = attrs.findIndex((a) => a && a.id === 'GTIN');
+  if (idx >= 0) {
+    const ex = attrs[idx];
+    const hasVal =
+      (ex.value_name != null &&
+        String(ex.value_name).trim() !== '' &&
+        String(ex.value_name).trim() !== '-1') ||
+      (ex.value_id != null && String(ex.value_id).trim() !== '');
+    if (!hasVal) attrs[idx] = { ...ex, id: 'GTIN', value_name: digits, value_id: null };
+  } else {
+    attrs.push({ id: 'GTIN', value_name: digits, value_id: null });
+  }
+  return attrs;
 }
 
 const mlCategoryAttributesCache = new Map();
@@ -5517,8 +5553,7 @@ app.post('/api/ad-models/:id/publish', async (req, res) => {
   const { marketplace, accountId, price: overridePrice, listing_type_id: overrideListingType,
     available_quantity: overrideQty, variation_prices: overrideVarPrices } = req.body;
   if (!marketplace || !accountId) return res.status(400).json({ error: 'marketplace e accountId obrigatórios' });
-  if (marketplace === 'shopee') return res.status(400).json({ error: 'Publicação na Shopee será implementada em breve. Estrutura preparada.' });
-  if (marketplace !== 'ml') return res.status(400).json({ error: 'Marketplace não suportado' });
+  if (marketplace !== 'ml' && marketplace !== 'shopee') return res.status(400).json({ error: 'Marketplace não suportado' });
 
   try {
     const model = await new Promise((resolve, reject) => {
@@ -5528,6 +5563,20 @@ app.post('/api/ad-models/:id/publish', async (req, res) => {
         resolve(row);
       });
     });
+
+    if (marketplace === 'shopee') {
+      const result = await publishAdModelToShopee(model, accountId, { price: overridePrice, qty: overrideQty });
+      const pubPrice = Number(overridePrice != null ? overridePrice : model.price) || 0;
+      db.run(`INSERT OR REPLACE INTO ad_model_publications (ad_model_id, marketplace, account_id, published_item_id, status, published_at, published_price, published_listing_type)
+        VALUES (?, ?, ?, ?, 'published', CURRENT_TIMESTAMP, ?, ?)`,
+        [id, 'shopee', accountId, String(result.item_id), pubPrice, null]);
+      return res.json({
+        success: true,
+        newItemId: String(result.item_id),
+        permalink: result.permalink,
+        marketplace: 'shopee',
+      });
+    }
 
     const pictures = JSON.parse(model.pictures || '[]');
     const attributes = JSON.parse(model.attributes || '[]');
@@ -5547,6 +5596,7 @@ app.post('/api/ad-models/:id/publish', async (req, res) => {
       if (['ITEM_CONDITION'].includes(a.id)) return false;
       return a.value_id || a.value_name;
     });
+    publishAttrs = mergeModelEanIntoGtinAttribute(publishAttrs, model.ean);
     publishAttrs = applyPackageMeasuresToMlAttributes(publishAttrs, parseAdModelPackageMeasures(model));
 
     const validVariations = variations.filter(v => v.attribute_combinations && v.attribute_combinations.length > 0);
@@ -5694,9 +5744,10 @@ app.post('/api/ad-models/:id/publish', async (req, res) => {
     res.json({ success: true, newItemId: result.id, permalink: result.permalink });
   } catch (err) {
     console.error('[Ad Models] Publish error:', err.response?.data || err.message);
-    const errMsg = mlApiErrorToUserMessage(err);
+    const errMsg = marketplace === 'ml' ? mlApiErrorToUserMessage(err) : (err.message || String(err));
+    const mp = marketplace === 'shopee' ? 'shopee' : 'ml';
     db.run(`INSERT OR REPLACE INTO ad_model_publications (ad_model_id, marketplace, account_id, status, error_message)
-      VALUES (?, ?, ?, 'error', ?)`, [id, 'ml', accountId, errMsg]);
+      VALUES (?, ?, ?, 'error', ?)`, [id, mp, accountId, errMsg]);
     res.status(500).json({ error: errMsg, details: err.response?.data });
   }
 });
@@ -5706,8 +5757,7 @@ app.post('/api/ad-models/bulk-publish', async (req, res) => {
   if (!marketplace || !accountId || !Array.isArray(items) || !items.length) {
     return res.status(400).json({ error: 'marketplace, accountId e items (array) obrigatórios' });
   }
-  if (marketplace === 'shopee') return res.status(400).json({ error: 'Publicação na Shopee será implementada em breve.' });
-  if (marketplace !== 'ml') return res.status(400).json({ error: 'Marketplace não suportado' });
+  if (marketplace !== 'ml' && marketplace !== 'shopee') return res.status(400).json({ error: 'Marketplace não suportado' });
 
   const results = { total: items.length, published: 0, errors: [] };
   const delay = ms => new Promise(r => setTimeout(r, ms));
@@ -5735,6 +5785,25 @@ app.post('/api/ad-models/bulk-publish', async (req, res) => {
           resolve(row);
         });
       });
+
+      if (marketplace === 'shopee') {
+        try {
+          const result = await publishAdModelToShopee(model, accountId, { price: overridePrice, qty: overrideQty });
+          const pubPrice = Number(overridePrice != null ? overridePrice : model.price) || 0;
+          db.run(`INSERT OR REPLACE INTO ad_model_publications (ad_model_id, marketplace, account_id, published_item_id, status, published_at, published_price, published_listing_type)
+            VALUES (?, ?, ?, ?, 'published', CURRENT_TIMESTAMP, ?, ?)`,
+            [modelId, 'shopee', accountId, String(result.item_id), pubPrice, null]);
+          results.published++;
+        } catch (e) {
+          results.errors.push({
+            modelId,
+            title: item.title || `#${modelId}`,
+            error: e.message || String(e),
+            details: e.response?.data,
+          });
+        }
+        continue;
+      }
 
       const pictures = JSON.parse(model.pictures || '[]');
       let attributes = JSON.parse(model.attributes || '[]');
@@ -5764,6 +5833,7 @@ app.post('/api/ad-models/bulk-publish', async (req, res) => {
         if (['ITEM_CONDITION'].includes(a.id)) return false;
         return a.value_id || a.value_name;
       });
+      publishAttrs = mergeModelEanIntoGtinAttribute(publishAttrs, model.ean);
       publishAttrs = applyPackageMeasuresToMlAttributes(publishAttrs, parseAdModelPackageMeasures(model));
 
       const validVariations = variations.filter(v => v.attribute_combinations && v.attribute_combinations.length > 0);
@@ -6172,6 +6242,156 @@ async function shopeeApiRequest(method, apiPath, params, body, accountId) {
 
 async function shopeeApiGet(apiPath, params, accountId) { return shopeeApiRequest('GET', apiPath, params, null, accountId); }
 async function shopeeApiPost(apiPath, body, accountId) { return shopeeApiRequest('POST', apiPath, null, body, accountId); }
+
+function parseAdModelMarketplaceMappings(row) {
+  if (!row || row.marketplace_mappings == null || row.marketplace_mappings === '') return {};
+  try {
+    const o = typeof row.marketplace_mappings === 'string' ? JSON.parse(row.marketplace_mappings) : row.marketplace_mappings;
+    return o && typeof o === 'object' ? o : {};
+  } catch {
+    return {};
+  }
+}
+
+async function shopeeApiPostMultipart(apiPath, form, accountId) {
+  const token = await refreshShopeeTokenIfNeeded(accountId);
+  const creds = await getShopeeCredentials(accountId);
+  const timestamp = Math.floor(Date.now() / 1000);
+  const sign = generateShopeeSign(creds.partnerId, apiPath, timestamp, token.access_token, creds.shopId, creds.partnerKey);
+  const baseParams = {
+    partner_id: creds.partnerId,
+    timestamp: String(timestamp),
+    access_token: token.access_token,
+    shop_id: creds.shopId,
+    sign,
+  };
+  const query = new URLSearchParams(baseParams).toString();
+  const url = `${SHOPEE_HOST}${apiPath}?${query}`;
+  const resp = await axios.post(url, form, {
+    headers: form.getHeaders(),
+    maxBodyLength: Infinity,
+    maxContentLength: Infinity,
+    timeout: 120000,
+  });
+  if (resp.data && resp.data.error) throw new Error(resp.data.message || resp.data.error);
+  return resp.data;
+}
+
+async function shopeeUploadProductImageFromUrl(accountId, imageUrl) {
+  const imgResp = await axios.get(imageUrl, {
+    responseType: 'arraybuffer',
+    timeout: 45000,
+    maxContentLength: 10 * 1024 * 1024,
+    headers: { 'User-Agent': 'Apoli/1.0' },
+  });
+  const buf = Buffer.from(imgResp.data);
+  const ext = (String(imageUrl).match(/\.(jpe?g|png|gif|webp)(\?|$)/i) || [])[1] || 'jpg';
+  const mime = /^png$/i.test(ext) ? 'image/png' : 'image/jpeg';
+  const form = new FormData();
+  form.append('image', buf, { filename: `img.${ext.replace(/[^a-z0-9]/gi, '') || 'jpg'}`, contentType: mime });
+  const data = await shopeeApiPostMultipart('/api/v2/media_space/upload_image', form, accountId);
+  const inner = data.response || data;
+  const id =
+    inner.image_info?.image_id ||
+    inner.image_id ||
+    (Array.isArray(inner.image_info_list) && inner.image_info_list[0] && (inner.image_info_list[0].image_info?.image_id || inner.image_info_list[0].image_id));
+  if (!id) throw new Error('Shopee não devolveu image_id no upload da imagem.');
+  return String(id);
+}
+
+async function shopeeGetLogisticInfoForAddItem(accountId) {
+  const data = await shopeeApiGet('/api/v2/logistics/get_channel_list', {}, accountId);
+  const inner = data.response || data;
+  const list = inner.logistic_channel_list || inner.logistics_channel_list || [];
+  const out = [];
+  for (const ch of list) {
+    const lid = ch.logistic_id ?? ch.logistics_channel_id;
+    if (lid != null) out.push({ logistic_id: Number(lid), enabled: true });
+  }
+  return out;
+}
+
+/**
+ * Publica modelo na Shopee usando category_id e title_override em marketplace_mappings.channels.shopee.
+ */
+async function publishAdModelToShopee(model, accountId, overrides) {
+  const variations = JSON.parse(model.variations || '[]');
+  const hasVar = variations.some((v) => v.attribute_combinations && v.attribute_combinations.length > 0);
+  if (hasVar) {
+    throw new Error('Publicação Shopee: nesta versão use um modelo sem variações.');
+  }
+  const maps = parseAdModelMarketplaceMappings(model);
+  const shopeeCh = maps.channels?.shopee || {};
+  const catRaw = shopeeCh.category_id != null && String(shopeeCh.category_id).trim() !== ''
+    ? String(shopeeCh.category_id).trim()
+    : '';
+  const categoryId = parseInt(catRaw, 10);
+  if (!Number.isFinite(categoryId) || categoryId <= 0) {
+    throw new Error('Informe o ID da categoria Shopee em Modelo → Mapeamento multi-marketplace.');
+  }
+  const pictures = JSON.parse(model.pictures || '[]');
+  const firstUrl = (pictures[0] && (pictures[0].source || pictures[0].secure_url)) || '';
+  if (!firstUrl) throw new Error('É necessário pelo menos uma imagem no modelo para publicar na Shopee.');
+  const price = Number(overrides.price != null ? overrides.price : model.price);
+  const stock = Number(overrides.qty != null ? overrides.qty : model.available_quantity);
+  if (!Number.isFinite(price) || price <= 0) throw new Error('Preço inválido.');
+  const stockInt = Math.max(0, Math.min(999999, Math.floor(Number.isFinite(stock) ? stock : 0)));
+
+  const pkg = parseAdModelPackageMeasures(model);
+  let pkgLen = 10;
+  let pkgW = 10;
+  let pkgH = 10;
+  let weightKg = 0.5;
+  if (pkg && pkg.has_factory_packaging !== false) {
+    const w = Number(pkg.width_cm);
+    const h = Number(pkg.height_cm);
+    const d = Number(pkg.depth_cm);
+    const kg = Number(pkg.weight_kg);
+    if (Number.isFinite(w) && w > 0) pkgW = w;
+    if (Number.isFinite(h) && h > 0) pkgH = h;
+    if (Number.isFinite(d) && d > 0) pkgLen = d;
+    if (Number.isFinite(kg) && kg > 0) weightKg = kg;
+  }
+
+  const titleBase = (shopeeCh.title_override || model.title || '').trim().slice(0, 255);
+  if (!titleBase) throw new Error('Título obrigatório.');
+
+  const desc = String(model.description || '').trim().slice(0, 5000) || '—';
+
+  const imageId = await shopeeUploadProductImageFromUrl(accountId, firstUrl);
+  let logistic_info = await shopeeGetLogisticInfoForAddItem(accountId);
+  if (!logistic_info.length) {
+    throw new Error('Não foi possível obter canais de logística na Shopee. Configure envio na loja e tente novamente.');
+  }
+
+  const itemSku = (model.sku && String(model.sku).trim()) || `miti-${model.id}`;
+
+  const addBody = {
+    item_name: titleBase,
+    description: desc,
+    category_id: categoryId,
+    item_sku: itemSku.slice(0, 100),
+    image: { image_id_list: [imageId] },
+    original_price: price,
+    item_status: 'NORMAL',
+    weight: weightKg,
+    dimension: {
+      package_length: Math.max(1, Math.round(pkgLen)),
+      package_width: Math.max(1, Math.round(pkgW)),
+      package_height: Math.max(1, Math.round(pkgH)),
+    },
+    logistic_info,
+    stock: stockInt,
+  };
+
+  const data = await shopeeApiPost('/api/v2/product/add_item', addBody, accountId);
+  const inner = data.response || data;
+  const itemId = inner.item_id;
+  if (!itemId) throw new Error(data.message || 'Resposta Shopee sem item_id.');
+  const creds = await getShopeeCredentials(accountId);
+  const permalink = creds.shopId ? `https://shopee.com.br/product/${creds.shopId}/${itemId}` : '';
+  return { item_id: itemId, permalink };
+}
 
 // --- Shopee Account Management ---
 

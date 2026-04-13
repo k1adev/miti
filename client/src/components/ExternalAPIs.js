@@ -536,7 +536,6 @@ export const ExternalAPIs = () => {
           <Globe className="w-8 h-8 text-blue-500" />
           <div>
             <h2 className="text-xl font-bold text-gray-900 dark:text-white">Marketplaces</h2>
-            <p className="text-sm text-gray-500 dark:text-gray-400">Gerencie integrações com marketplaces (Mercado Livre, Amazon, Shopee, Shein, Olist, Leroy Merlin...)</p>
           </div>
         </div>
 

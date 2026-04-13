@@ -25,6 +25,9 @@ const TEMPLATE_STATUS = {
 /** Atributos que o servidor não envia na publicação ML — não marcar como pendência */
 const ML_ATTR_IDS_IGNORE_VALIDATE = ['ITEM_CONDITION'];
 
+/** `true` mostra a aba «Mapeamento multi-marketplace» no modal de modelo; desligado até retomarem o trabalho nessa área. */
+const SHOW_MODEL_MARKETPLACE_MAPPING_TAB = false;
+
 const DEFAULT_PACKAGE_FORM = () => ({
   has_factory_packaging: true,
   width_cm: '',
@@ -67,6 +70,38 @@ function serializePackageMeasuresForApi(pkg) {
   if (Number.isFinite(d) && d > 0) o.depth_cm = d;
   if (Number.isFinite(kg) && kg > 0) o.weight_kg = kg;
   return o;
+}
+
+const DEFAULT_MARKETPLACE_MAPPINGS = () => ({
+  version: 1,
+  canonical: { brand: '', model_name: '', material: '', color: '' },
+  channels: {
+    mercadolivre: { notes: '' },
+    shopee: { category_id: '', brand_name: '', title_override: '', notes: '' },
+    amazon: { product_type: '', browse_node: '', title_override: '', notes: '' },
+    leroy_merlin: { category_id: '', notes: '' },
+  },
+});
+
+function parseMarketplaceMappings(raw) {
+  const d = DEFAULT_MARKETPLACE_MAPPINGS();
+  if (raw == null || raw === '') return d;
+  try {
+    const o = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!o || typeof o !== 'object') return d;
+    return {
+      version: o.version || 1,
+      canonical: { ...d.canonical, ...(o.canonical || {}) },
+      channels: {
+        mercadolivre: { ...d.channels.mercadolivre, ...(o.channels?.mercadolivre || o.channels?.mercado_livre || {}) },
+        shopee: { ...d.channels.shopee, ...(o.channels?.shopee || {}) },
+        amazon: { ...d.channels.amazon, ...(o.channels?.amazon || {}) },
+        leroy_merlin: { ...d.channels.leroy_merlin, ...(o.channels?.leroy_merlin || {}) },
+      },
+    };
+  } catch {
+    return d;
+  }
 }
 
 function mlAttrValueEmpty(attr) {
@@ -277,6 +312,7 @@ export const Anuncios = ({ user }) => {
   const [modelVariationAxisChoice, setModelVariationAxisChoice] = useState(null);
   /** Índices de variação expandidos no modal (acordeão). */
   const [modelVariationExpanded, setModelVariationExpanded] = useState(() => new Set([0]));
+  const [modelEditViewTab, setModelEditViewTab] = useState('detalhes');
   const modelPictureFileInputRef = useRef(null);
 
   const loadPackagePresets = useCallback(async () => {
@@ -352,6 +388,10 @@ export const Anuncios = ({ user }) => {
     setModelAttrSearch('');
     loadPackagePresets();
   }, [modelEditModal?.id, modelEditModal?.category_id, loadPackagePresets]);
+
+  useEffect(() => {
+    if (modelEditModal) setModelEditViewTab('detalhes');
+  }, [modelEditModal?.id]);
 
   useEffect(() => {
     if (!packagePresetsModalOpen) return;
@@ -904,6 +944,7 @@ export const Anuncios = ({ user }) => {
       if (modelEditModal._shipping) payload.shipping = modelEditModal._shipping;
       if (modelEditModal._sale_terms) payload.sale_terms = modelEditModal._sale_terms;
       payload.package_measures = serializePackageMeasuresForApi(modelEditModal._package);
+      if (modelEditModal._marketplace_mappings) payload.marketplace_mappings = modelEditModal._marketplace_mappings;
 
       if (modelEditModal.id) {
         await axios.put(`/api/ad-models/${modelEditModal.id}`, payload);
@@ -1510,13 +1551,13 @@ export const Anuncios = ({ user }) => {
                 className="px-3 py-2 bg-purple-600 hover:bg-purple-700 text-white text-sm rounded-lg transition-colors flex items-center gap-1.5">
                 <Download className="w-4 h-4" /> Importar de Anúncio
                             </button>
-              <button onClick={() => setModelEditModal({ title: '', sku: '', ean: '', price: 0, available_quantity: 1, listing_type_id: 'gold_special', condition: 'new', buying_mode: 'buy_it_now', currency_id: 'BRL', category_id: '', description: '', video_id: '', _attributes: [], _variations: [], _shipping: null, _sale_terms: [], _pictures: [], _package: DEFAULT_PACKAGE_FORM() })}
+              <button onClick={() => setModelEditModal({ title: '', sku: '', ean: '', price: 0, available_quantity: 1, listing_type_id: 'gold_special', condition: 'new', buying_mode: 'buy_it_now', currency_id: 'BRL', category_id: '', description: '', video_id: '', _attributes: [], _variations: [], _shipping: null, _sale_terms: [], _pictures: [], _package: DEFAULT_PACKAGE_FORM(), _marketplace_mappings: DEFAULT_MARKETPLACE_MAPPINGS() })}
                 className="px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded-lg transition-colors flex items-center gap-1.5">
                 <Plus className="w-4 h-4" /> Novo Modelo
               </button>
               <button type="button" onClick={() => setPackagePresetsModalOpen(true)}
                 className="px-3 py-2 border border-amber-400/80 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-900 dark:text-amber-200 text-sm rounded-lg transition-colors flex items-center gap-1.5 hover:bg-amber-100 dark:hover:bg-amber-900/50">
-                <Ruler className="w-4 h-4" /> Caixas (presets)
+                <Ruler className="w-4 h-4" /> Caixas
               </button>
               {selectedModels.size > 0 && (
                 <>
@@ -1558,7 +1599,7 @@ export const Anuncios = ({ user }) => {
                 const statusDotColor = (s) => s === 'active' ? 'bg-green-500' : s === 'paused' ? 'bg-yellow-500' : s === 'closed' ? 'bg-red-500' : 'bg-gray-400';
 
                 return (
-                  <div key={model.id} className="border dark:border-gray-700 rounded-xl bg-white dark:bg-gray-800 shadow-sm hover:shadow-md transition-shadow overflow-hidden">
+                  <div key={model.id} className="border dark:border-gray-700 rounded-xl bg-white dark:bg-gray-800 shadow-sm hover:shadow-md transition-shadow overflow-visible">
                     <div className="flex items-start gap-4 p-4 cursor-pointer" onClick={() => toggleModelExpand(model.id)}>
                       {/* Checkbox */}
                       <div className="pt-1">
@@ -1622,13 +1663,13 @@ export const Anuncios = ({ user }) => {
                                 title="Criar novo anúncio">
                                 Criar Anúncio
                             </button>
-                              <div className="relative">
+                              <div className="relative z-20">
                                 <button onClick={(e) => { e.stopPropagation(); setOpenActionMenu(openActionMenu === model.id ? null : model.id); }}
                                   className="p-1 rounded text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">
                                   <MoreVertical className="w-4 h-4" />
                                 </button>
                                 {openActionMenu === model.id && (
-                                  <div className="absolute right-0 top-full mt-1 w-52 bg-white dark:bg-gray-800 rounded-lg shadow-xl border dark:border-gray-700 py-1 z-50"
+                                  <div className="absolute right-0 top-full mt-1 w-52 bg-white dark:bg-gray-800 rounded-lg shadow-xl border dark:border-gray-700 py-1 z-[200]"
                                     onClick={(e) => e.stopPropagation()}>
                                     <button onClick={() => {
                                       let _attributes = [], _variations = [], _shipping = null, _sale_terms = [], _pictures = [];
@@ -1637,7 +1678,7 @@ export const Anuncios = ({ user }) => {
                                       try { _shipping = JSON.parse(model.shipping || 'null'); } catch {}
                                       try { _sale_terms = JSON.parse(model.sale_terms || '[]'); } catch {}
                                       try { _pictures = JSON.parse(model.pictures || '[]'); } catch {}
-                                      setModelEditModal({ ...model, description: model.description || '', _attributes, _variations, _shipping, _sale_terms, _pictures, _package: parsePackageMeasuresFromModel(model) });
+                                      setModelEditModal({ ...model, description: model.description || '', _attributes, _variations, _shipping, _sale_terms, _pictures, _package: parsePackageMeasuresFromModel(model), _marketplace_mappings: parseMarketplaceMappings(model.marketplace_mappings) });
                                       setOpenActionMenu(null);
                                     }}
                                       className="w-full text-left px-3 py-2 text-sm flex items-center gap-2.5 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
@@ -1657,7 +1698,7 @@ export const Anuncios = ({ user }) => {
                                       className="w-full text-left px-3 py-2 text-sm flex items-center gap-2.5 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
                                       <Download className="w-3.5 h-3.5 text-purple-500" /> Download fotos
                                     </a>
-                                    <button onClick={() => { const m = model; const dup = { ...m, id: undefined, title: `${m.title} (cópia)` }; setModelEditModal({ ...dup, description: dup.description || '', _attributes: (() => { try { return JSON.parse(m.attributes || '[]'); } catch { return []; } })(), _variations: (() => { try { return JSON.parse(m.variations || '[]'); } catch { return []; } })(), _shipping: (() => { try { return JSON.parse(m.shipping || 'null'); } catch { return null; } })(), _sale_terms: (() => { try { return JSON.parse(m.sale_terms || '[]'); } catch { return []; } })(), _pictures: (() => { try { return JSON.parse(m.pictures || '[]'); } catch { return []; } })(), _package: parsePackageMeasuresFromModel(m) }); setOpenActionMenu(null); }}
+                                    <button onClick={() => { const m = model; const dup = { ...m, id: undefined, title: `${m.title} (cópia)` }; setModelEditModal({ ...dup, description: dup.description || '', _attributes: (() => { try { return JSON.parse(m.attributes || '[]'); } catch { return []; } })(), _variations: (() => { try { return JSON.parse(m.variations || '[]'); } catch { return []; } })(), _shipping: (() => { try { return JSON.parse(m.shipping || 'null'); } catch { return null; } })(), _sale_terms: (() => { try { return JSON.parse(m.sale_terms || '[]'); } catch { return []; } })(), _pictures: (() => { try { return JSON.parse(m.pictures || '[]'); } catch { return []; } })(), _package: parsePackageMeasuresFromModel(m), _marketplace_mappings: parseMarketplaceMappings(m.marketplace_mappings) }); setOpenActionMenu(null); }}
                                       className="w-full text-left px-3 py-2 text-sm flex items-center gap-2.5 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
                                       <Copy className="w-3.5 h-3.5 text-indigo-500" /> Duplicar modelo
                                     </button>
@@ -2327,6 +2368,31 @@ export const Anuncios = ({ user }) => {
               <h3 className="text-lg font-bold text-gray-900 dark:text-white">{modelEditModal.id ? 'Editar Modelo' : 'Novo Modelo de Anúncio'}</h3>
               <button onClick={() => setModelEditModal(null)} className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700"><X className="w-5 h-5" /></button>
             </div>
+            {SHOW_MODEL_MARKETPLACE_MAPPING_TAB && (
+            <div className="flex flex-wrap gap-1.5 mb-3 border-b border-gray-200 dark:border-gray-600">
+              <button
+                type="button"
+                onClick={() => setModelEditViewTab('detalhes')}
+                className={`px-3 py-2 text-sm font-medium rounded-t-lg border-b-2 -mb-px transition-colors ${
+                  modelEditViewTab === 'detalhes'
+                    ? 'border-blue-500 text-blue-600 dark:text-blue-400'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}`}
+              >
+                Detalhes do anúncio
+              </button>
+              <button
+                type="button"
+                onClick={() => setModelEditViewTab('mapeamento')}
+                className={`px-3 py-2 text-sm font-medium rounded-t-lg border-b-2 -mb-px transition-colors inline-flex items-center gap-1.5 ${
+                  modelEditViewTab === 'mapeamento'
+                    ? 'border-blue-500 text-blue-600 dark:text-blue-400'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}`}
+              >
+                <Globe className="w-4 h-4 shrink-0" /> Mapeamento multi-marketplace
+              </button>
+            </div>
+            )}
+            {(SHOW_MODEL_MARKETPLACE_MAPPING_TAB ? modelEditViewTab === 'detalhes' : true) && (
             <div className="space-y-4">
               <div className="grid grid-cols-1 xl:grid-cols-12 gap-3 xl:gap-4 items-start">
                 <div className="xl:col-span-3 min-w-0">
@@ -2999,6 +3065,365 @@ export const Anuncios = ({ user }) => {
                 </div>
               )}
             </div>
+            )}
+
+            {SHOW_MODEL_MARKETPLACE_MAPPING_TAB && modelEditViewTab === 'mapeamento' && modelEditModal && (() => {
+              const mm = parseMarketplaceMappings(modelEditModal._marketplace_mappings);
+              const ch = mm.channels;
+              return (
+                <div className="space-y-5 max-h-[min(70vh,840px)] overflow-y-auto pr-1 text-sm">
+                  <div className="rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-950/20 p-4 text-xs text-gray-700 dark:text-gray-300 leading-relaxed">
+                    <p className="font-semibold text-gray-900 dark:text-white mb-1.5">Núcleo canónico e canais</p>
+                    <p>
+                      Guarde aqui equivalências entre marketplaces. O Mercado Livre continua a usar a categoria e a ficha técnica na aba <strong className="font-medium">Detalhes do anúncio</strong>.
+                      Shopee, Amazon e Leroy Merlin exigem IDs e listas próprios — estes campos alimentam futuras publicações e integrações por canal.
+                    </p>
+                  </div>
+
+                  <div className="rounded-xl border border-gray-200 dark:border-gray-600 p-4 space-y-3 bg-white dark:bg-gray-800/50">
+                    <h4 className="font-semibold text-gray-900 dark:text-white">Núcleo canónico</h4>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {[
+                        { key: 'brand', label: 'Campo canónico 1' },
+                        { key: 'model_name', label: 'Campo canónico 2' },
+                        { key: 'material', label: 'Campo canónico 3' },
+                        { key: 'color', label: 'Campo canónico 4' },
+                      ].map(({ key, label }) => (
+                        <div key={key}>
+                          <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">{label}</label>
+                          <input
+                            type="text"
+                            value={mm.canonical[key] || ''}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              setModelEditModal((p) => {
+                                const m = parseMarketplaceMappings(p._marketplace_mappings);
+                                return {
+                                  ...p,
+                                  _marketplace_mappings: {
+                                    ...m,
+                                    canonical: { ...m.canonical, [key]: v },
+                                  },
+                                };
+                              });
+                            }}
+                            className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="overflow-x-auto rounded-xl border border-gray-200 dark:border-gray-600">
+                    <table className="min-w-full text-xs">
+                      <thead>
+                        <tr className="bg-gray-50 dark:bg-gray-900/50 border-b border-gray-200 dark:border-gray-600">
+                          <th className="text-left px-3 py-2 font-semibold text-gray-800 dark:text-gray-200">Conceito</th>
+                          <th className="text-left px-3 py-2 font-semibold text-gray-800 dark:text-gray-200">Mercado Livre</th>
+                          <th className="text-left px-3 py-2 font-semibold text-gray-800 dark:text-gray-200">Shopee</th>
+                          <th className="text-left px-3 py-2 font-semibold text-gray-800 dark:text-gray-200">Amazon (SP-API)</th>
+                          <th className="text-left px-3 py-2 font-semibold text-gray-800 dark:text-gray-200">Leroy Merlin</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+                        <tr>
+                          <td className="px-3 py-2 text-gray-700 dark:text-gray-300">Atributos de catálogo</td>
+                          <td className="px-3 py-2 font-mono text-[11px] text-gray-600 dark:text-gray-400">Por categoria (API)</td>
+                          <td className="px-3 py-2 text-gray-600 dark:text-gray-400">Por categoria (API)</td>
+                          <td className="px-3 py-2 text-gray-600 dark:text-gray-400">Por product type</td>
+                          <td className="px-3 py-2 text-gray-600 dark:text-gray-400">Conforme integração</td>
+                        </tr>
+                        <tr>
+                          <td className="px-3 py-2 text-gray-700 dark:text-gray-300">Categoria</td>
+                          <td className="px-3 py-2 font-mono text-[11px] text-gray-600 dark:text-gray-400">category_id (MLB…)</td>
+                          <td className="px-3 py-2 text-gray-600 dark:text-gray-400">category_id (árvore Shopee)</td>
+                          <td className="px-3 py-2 text-gray-600 dark:text-gray-400">product_type + browse</td>
+                          <td className="px-3 py-2 text-gray-600 dark:text-gray-400">Categoria interna LM</td>
+                        </tr>
+                        <tr>
+                          <td className="px-3 py-2 text-gray-700 dark:text-gray-300">Código de barras</td>
+                          <td className="px-3 py-2 font-mono text-[11px] text-gray-600 dark:text-gray-400">GTIN / EAN</td>
+                          <td className="px-3 py-2 text-gray-600 dark:text-gray-400">EAN no item</td>
+                          <td className="px-3 py-2 text-gray-600 dark:text-gray-400">externally_assigned_product_identifier</td>
+                          <td className="px-3 py-2 text-gray-600 dark:text-gray-400">EAN 13 típico</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div className="rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50/40 dark:bg-amber-950/20 p-4 space-y-2">
+                    <div className="flex items-center gap-2">
+                      <img src="/mercado-livre.png" alt="" className="w-6 h-6 rounded-sm object-contain" />
+                      <span className="font-semibold text-gray-900 dark:text-white">Mercado Livre</span>
+                    </div>
+                    <p className="text-xs text-gray-600 dark:text-gray-400">
+                      Categoria: <span className="font-mono">{modelEditModal.category_id || '—'}</span>
+                      {modelEditModal.category_name && <span className="ml-1">({modelEditModal.category_name})</span>}
+                    </p>
+                    <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mt-2">Notas internas (ML)</label>
+                    <textarea
+                      rows={2}
+                      value={ch.mercadolivre.notes || ''}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setModelEditModal((p) => {
+                          const m = parseMarketplaceMappings(p._marketplace_mappings);
+                          return {
+                            ...p,
+                            _marketplace_mappings: {
+                              ...m,
+                              channels: { ...m.channels, mercadolivre: { ...m.channels.mercadolivre, notes: v } },
+                            },
+                          };
+                        });
+                      }}
+                      className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                      placeholder="Observações só para a sua equipa…"
+                    />
+                  </div>
+
+                  <div className="rounded-xl border border-orange-200 dark:border-orange-800 bg-orange-50/30 dark:bg-orange-950/15 p-4 space-y-3">
+                    <div className="flex items-center gap-2">
+                      <img src="/shopee.png" alt="" className="w-6 h-6 rounded-sm object-contain" />
+                      <span className="font-semibold text-gray-900 dark:text-white">Shopee</span>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Categoria (ID Shopee)</label>
+                        <input
+                          type="text"
+                          value={ch.shopee.category_id || ''}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            setModelEditModal((p) => {
+                              const m = parseMarketplaceMappings(p._marketplace_mappings);
+                              return {
+                                ...p,
+                                _marketplace_mappings: {
+                                  ...m,
+                                  channels: { ...m.channels, shopee: { ...m.channels.shopee, category_id: v } },
+                                },
+                              };
+                            });
+                          }}
+                          className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 font-mono text-gray-900 dark:text-white"
+                          placeholder="ex.: 100053"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Texto auxiliar (Shopee)</label>
+                        <input
+                          type="text"
+                          value={ch.shopee.brand_name || ''}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            setModelEditModal((p) => {
+                              const m = parseMarketplaceMappings(p._marketplace_mappings);
+                              return {
+                                ...p,
+                                _marketplace_mappings: {
+                                  ...m,
+                                  channels: { ...m.channels, shopee: { ...m.channels.shopee, brand_name: v } },
+                                },
+                              };
+                            });
+                          }}
+                          className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                          placeholder="Notas para integração futura"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Título alternativo (override)</label>
+                      <input
+                        type="text"
+                        value={ch.shopee.title_override || ''}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setModelEditModal((p) => {
+                            const m = parseMarketplaceMappings(p._marketplace_mappings);
+                            return {
+                              ...p,
+                              _marketplace_mappings: {
+                                ...m,
+                                channels: { ...m.channels, shopee: { ...m.channels.shopee, title_override: v } },
+                              },
+                            };
+                          });
+                        }}
+                        className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Notas</label>
+                      <textarea
+                        rows={2}
+                        value={ch.shopee.notes || ''}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setModelEditModal((p) => {
+                            const m = parseMarketplaceMappings(p._marketplace_mappings);
+                            return {
+                              ...p,
+                              _marketplace_mappings: {
+                                ...m,
+                                channels: { ...m.channels, shopee: { ...m.channels.shopee, notes: v } },
+                              },
+                            };
+                          });
+                        }}
+                        className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-gray-300 dark:border-gray-600 p-4 space-y-3 bg-gray-50/50 dark:bg-gray-900/30">
+                    <div className="flex items-center gap-2">
+                      <img src="/amazon.png" alt="" className="w-6 h-6 rounded-sm object-contain" />
+                      <span className="font-semibold text-gray-900 dark:text-white">Amazon</span>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Product type</label>
+                        <input
+                          type="text"
+                          value={ch.amazon.product_type || ''}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            setModelEditModal((p) => {
+                              const m = parseMarketplaceMappings(p._marketplace_mappings);
+                              return {
+                                ...p,
+                                _marketplace_mappings: {
+                                  ...m,
+                                  channels: { ...m.channels, amazon: { ...m.channels.amazon, product_type: v } },
+                                },
+                              };
+                            });
+                          }}
+                          className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 font-mono text-gray-900 dark:text-white"
+                          placeholder="ex.: LAMP"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Browse node / referência</label>
+                        <input
+                          type="text"
+                          value={ch.amazon.browse_node || ''}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            setModelEditModal((p) => {
+                              const m = parseMarketplaceMappings(p._marketplace_mappings);
+                              return {
+                                ...p,
+                                _marketplace_mappings: {
+                                  ...m,
+                                  channels: { ...m.channels, amazon: { ...m.channels.amazon, browse_node: v } },
+                                },
+                              };
+                            });
+                          }}
+                          className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Título alternativo (override)</label>
+                      <input
+                        type="text"
+                        value={ch.amazon.title_override || ''}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setModelEditModal((p) => {
+                            const m = parseMarketplaceMappings(p._marketplace_mappings);
+                            return {
+                              ...p,
+                              _marketplace_mappings: {
+                                ...m,
+                                channels: { ...m.channels, amazon: { ...m.channels.amazon, title_override: v } },
+                              },
+                            };
+                          });
+                        }}
+                        className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Notas</label>
+                      <textarea
+                        rows={2}
+                        value={ch.amazon.notes || ''}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setModelEditModal((p) => {
+                            const m = parseMarketplaceMappings(p._marketplace_mappings);
+                            return {
+                              ...p,
+                              _marketplace_mappings: {
+                                ...m,
+                                channels: { ...m.channels, amazon: { ...m.channels.amazon, notes: v } },
+                              },
+                            };
+                          });
+                        }}
+                        className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50/30 dark:bg-emerald-950/15 p-4 space-y-3">
+                    <div className="flex items-center gap-2">
+                      <img src="/leroy-merlin.png" alt="" className="w-6 h-6 rounded-sm object-contain" />
+                      <span className="font-semibold text-gray-900 dark:text-white">Leroy Merlin</span>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Categoria / referência interna</label>
+                      <input
+                        type="text"
+                        value={ch.leroy_merlin.category_id || ''}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setModelEditModal((p) => {
+                            const m = parseMarketplaceMappings(p._marketplace_mappings);
+                            return {
+                              ...p,
+                              _marketplace_mappings: {
+                                ...m,
+                                channels: { ...m.channels, leroy_merlin: { ...m.channels.leroy_merlin, category_id: v } },
+                              },
+                            };
+                          });
+                        }}
+                        className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Notas</label>
+                      <textarea
+                        rows={2}
+                        value={ch.leroy_merlin.notes || ''}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setModelEditModal((p) => {
+                            const m = parseMarketplaceMappings(p._marketplace_mappings);
+                            return {
+                              ...p,
+                              _marketplace_mappings: {
+                                ...m,
+                                channels: { ...m.channels, leroy_merlin: { ...m.channels.leroy_merlin, notes: v } },
+                              },
+                            };
+                          });
+                        }}
+                        className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                        placeholder="Requisitos EAN, imagens 1:1, contacto comercial…"
+                      />
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
             <div className="flex justify-end gap-3 mt-6">
               <button onClick={() => setModelEditModal(null)} className="px-4 py-2 border dark:border-gray-600 text-gray-700 dark:text-gray-300 rounded-lg text-sm hover:bg-gray-50 dark:hover:bg-gray-700">Cancelar</button>
               <button onClick={handleModelSave} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium">Salvar</button>
