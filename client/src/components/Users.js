@@ -127,6 +127,7 @@ export const Users = ({ user }) => {
                 <option value={2}>Nível 2 - Estoque e Vendas</option>
                 <option value={3}>Nível 3 - Quase tudo</option>
                 <option value={4}>Nível 4 - Administrador</option>
+                <option value={5}>Nível 5 - Externo (apenas registrar entregas)</option>
               </select>
             </div>
             <div className="flex space-x-3">

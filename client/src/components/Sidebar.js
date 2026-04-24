@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { Home, Users, Globe, Activity, ShoppingCart, Archive, LogOut, BarChart2, Shield, ChevronLeft, ChevronRight, Sun, Moon, Megaphone, MessageSquare } from 'lucide-react';
+import { Home, Users, Settings, Activity, ShoppingCart, Archive, LogOut, BarChart2, Shield, ChevronLeft, ChevronRight, Sun, Moon, Megaphone, MessageSquare } from 'lucide-react';
 import axios from 'axios';
 
 function requestNotifPermission() {
@@ -69,6 +69,7 @@ export const Sidebar = ({ user, onSelectEstoqueTab, activeEstoqueTab, onLogout, 
         { path: '/sales', label: 'Pedidos', icon: ShoppingCart },
         { path: '/anuncios', label: 'Anúncios', icon: Megaphone },
         { path: '/atendimento', label: 'Atendimento', icon: MessageSquare },
+        { path: '/sales-report', label: 'Relatório', icon: BarChart2 },
       ];
     } else if (user.role === 3) {
       menuItems = [
@@ -89,7 +90,7 @@ export const Sidebar = ({ user, onSelectEstoqueTab, activeEstoqueTab, onLogout, 
         { path: '/sales-report', label: 'Relatório', icon: BarChart2 },
         { path: '/status', label: 'Status', icon: Activity },
         { path: '/users', label: 'Usuários', icon: Users },
-        { path: '/external-apis', label: 'APIs Externas', icon: Globe },
+        { path: '/configuracoes', label: 'Configurações', icon: Settings },
         { path: '/admin', label: 'Painel Admin', icon: Shield },
       ];
     }
@@ -254,24 +255,28 @@ export const Sidebar = ({ user, onSelectEstoqueTab, activeEstoqueTab, onLogout, 
 
               {!collapsed && item.path === '/sales-report' && (location.pathname.startsWith('/sales-report') || salesReportOpen) && (
                 <ul className={`ml-10 mt-0.5 space-y-0.5 overflow-hidden transition-all duration-200 ${salesReportOpen ? 'max-h-96 opacity-100' : 'max-h-0 opacity-0'}`}>
-                  <li>
-                    <button
-                      className={`text-left text-xs px-2.5 py-1.5 rounded-md w-full transition-colors ${(new URLSearchParams(location.search).get('tab') || 'vendas') === 'vendas' ? 'bg-blue-50/70 dark:bg-blue-800/40 text-blue-600 dark:text-blue-200 font-semibold' : 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700/50 hover:text-gray-800 dark:hover:text-gray-200'}`}
-                      onClick={() => navigate('/sales-report?tab=vendas')}
-                    >
-                      Vendas
-                    </button>
-                  </li>
-                  {user.role === 4 && (
-                    <li>
-                      <button
-                        className={`text-left text-xs px-2.5 py-1.5 rounded-md w-full transition-colors ${new URLSearchParams(location.search).get('tab') === 'reposicao' ? 'bg-blue-50/70 dark:bg-blue-800/40 text-blue-600 dark:text-blue-200 font-semibold' : 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700/50 hover:text-gray-800 dark:hover:text-gray-200'}`}
-                        onClick={() => navigate('/sales-report?tab=reposicao')}
-                      >
-                        Reposição de Estoque
-                      </button>
-                    </li>
-                  )}
+                  {(() => {
+                    const currentTab = new URLSearchParams(location.search).get('tab');
+                    const defaultTab = user.role >= 3 ? 'vendas' : 'reposicao';
+                    const subs = [
+                      user.role >= 3 && { tab: 'vendas', label: 'Vendas' },
+                      user.role >= 2 && { tab: 'reposicao', label: 'Reposição de Estoque' },
+                      user.role >= 2 && { tab: 'lotes', label: 'Lote' },
+                    ].filter(Boolean);
+                    return subs.map(sub => {
+                      const active = currentTab === sub.tab || (!currentTab && sub.tab === defaultTab);
+                      return (
+                        <li key={sub.tab}>
+                          <button
+                            className={`text-left text-xs px-2.5 py-1.5 rounded-md w-full transition-colors ${active ? 'bg-blue-50/70 dark:bg-blue-800/40 text-blue-600 dark:text-blue-200 font-semibold' : 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700/50 hover:text-gray-800 dark:hover:text-gray-200'}`}
+                            onClick={() => navigate(`/sales-report?tab=${sub.tab}`)}
+                          >
+                            {sub.label}
+                          </button>
+                        </li>
+                      );
+                    });
+                  })()}
                 </ul>
               )}
             </li>

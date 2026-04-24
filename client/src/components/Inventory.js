@@ -10,6 +10,7 @@ import { CompositeSkuManager } from './CompositeSkuManager';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useDebounce } from '../hooks/useDebounce';
 import { useToast } from './Toast';
+import PendingFactoryReceipts from './inventory/PendingFactoryReceipts';
 
 export const Inventory = ({ user }) => {
   const location = useLocation();
@@ -452,6 +453,12 @@ export const Inventory = ({ user }) => {
     try {
       // Converter is_composite para 0 ou 1
       const dataToSend = { ...formData, is_composite: formData.is_composite ? 1 : 0 };
+      // Custo de fabricação é visível/editável somente para role=4. Para os
+      // demais, removemos o campo do payload para evitar sobrescrever o valor
+      // atual no servidor (defense-in-depth: o backend também ignora).
+      if (user?.role !== 4) {
+        delete dataToSend.cost_price;
+      }
       let savedSku = formData.sku;
       if (selectedItem) {
         await axios.put(`/api/inventory/${selectedItem.id}`, dataToSend);
@@ -1612,19 +1619,22 @@ export const Inventory = ({ user }) => {
                         <option value="Outros">Outros</option>
                       </select>
                     </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        Preço de Custo
-                      </label>
-                      <input
-                        type="number"
-                        step="0.01"
-                        min="0"
-                        value={formData.cost_price}
-                        onChange={(e) => setFormData({ ...formData, cost_price: e.target.value })}
-                        className="input-field"
-                      />
-                    </div>
+                    {user?.role === 4 && (
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                          Custo de Fabricação
+                        </label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          value={formData.cost_price}
+                          onChange={(e) => setFormData({ ...formData, cost_price: e.target.value })}
+                          className="input-field"
+                          placeholder="Ex.: 125.00"
+                        />
+                      </div>
+                    )}
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
@@ -2178,7 +2188,8 @@ export const Inventory = ({ user }) => {
         </div>
       )}
       {activeTab === 'movimentacao' && (
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 items-start">
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 xl:col-span-2 xl:order-1 order-2">
           <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Movimentação de Estoque</h2>
           <p className="text-gray-600 dark:text-gray-300 mb-4">Registre entradas e saídas de estoque e visualize o histórico de movimentações.</p>
           {/* Formulário de movimentação */}
@@ -2385,6 +2396,10 @@ export const Inventory = ({ user }) => {
               </div>
             )}
           </div>
+        </div>
+        <div className="xl:col-span-1 xl:order-2 order-1">
+          <PendingFactoryReceipts onAfterChange={() => { fetchMovements(); fetchInventory(); }} />
+        </div>
         </div>
       )}
       {activeTab === 'historico-aglutinados' && (

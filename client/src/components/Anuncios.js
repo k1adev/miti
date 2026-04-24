@@ -3,12 +3,13 @@ import { useSearchParams } from 'react-router-dom';
 import {
   Search, Upload, RefreshCw, Link2, Unlink, Globe, ToggleLeft, ToggleRight,
   CheckCircle, AlertTriangle, Pause, Play, ExternalLink, Star, Award,
-  Download, Send, X, ChevronDown, ChevronUp, ChevronRight, ChevronLeft, Edit3, Trash2, Copy, Package, Plus, MoreVertical, Image, Ruler
+  Download, Send, X, ChevronDown, ChevronUp, ChevronRight, ChevronLeft, Edit3, Trash2, Copy, Package, Plus, MoreVertical, Image, Ruler, Info, GripVertical, Zap, Loader2, History, SlidersHorizontal
 } from 'lucide-react';
 import axios from 'axios';
 import { useDebounce } from '../hooks/useDebounce';
 import { useToast } from './Toast';
 import { ModelVariationAccordionRow } from './ModelVariationAccordionRow';
+import { InventoryAutocomplete } from './InventoryAutocomplete';
 
 const LISTING_TYPE_MAP = {
   gold_pro: { label: 'Premium', color: 'bg-orange-100 text-orange-700', icon: Star },
@@ -25,8 +26,8 @@ const TEMPLATE_STATUS = {
 /** Atributos que o servidor não envia na publicação ML — não marcar como pendência */
 const ML_ATTR_IDS_IGNORE_VALIDATE = ['ITEM_CONDITION'];
 
-/** `true` mostra a aba «Mapeamento multi-marketplace» no modal de modelo; desligado até retomarem o trabalho nessa área. */
-const SHOW_MODEL_MARKETPLACE_MAPPING_TAB = false;
+/** Mostra a aba «Mapeamento multi-marketplace» no modal de modelo. Reativada em M5. */
+const SHOW_MODEL_MARKETPLACE_MAPPING_TAB = true;
 
 const DEFAULT_PACKAGE_FORM = () => ({
   has_factory_packaging: true,
@@ -77,7 +78,7 @@ const DEFAULT_MARKETPLACE_MAPPINGS = () => ({
   canonical: { brand: '', model_name: '', material: '', color: '' },
   channels: {
     mercadolivre: { notes: '' },
-    shopee: { category_id: '', brand_name: '', title_override: '', notes: '' },
+    shopee: { category_id: '', category_name: '', brand_id: null, brand_name: '', attributes: {}, title_override: '', notes: '' },
     amazon: { product_type: '', browse_node: '', title_override: '', notes: '' },
     leroy_merlin: { category_id: '', notes: '' },
   },
@@ -241,6 +242,994 @@ function validateModelEditModal(m) {
   return errs;
 }
 
+/**
+ * Picker de Marca da Shopee. A lista é fechada por categoria — a Shopee só
+ * aceita marcas oficialmente cadastradas OU "Sem Marca" (brand_id=0). Por isso
+ * não permitimos texto livre: o seller escolhe de uma lista filtrada por busca.
+ */
+function ShopeeBrandPicker({ accountId, categoryId, brandId, brandName, onPick, onClear }) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!open || !accountId || !categoryId) return;
+    const tid = setTimeout(async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const r = await axios.get(`/api/shopee/categories/${categoryId}/brands`, { params: { accountId, search } });
+        setItems(Array.isArray(r.data?.brands) ? r.data.brands : []);
+      } catch (e) {
+        setItems([]);
+        setError(e.response?.data?.error || e.message);
+      }
+      setLoading(false);
+    }, 260);
+    return () => clearTimeout(tid);
+  }, [open, accountId, categoryId, search]);
+
+  const openPicker = () => {
+    if (!categoryId) return;
+    setSearch('');
+    setOpen(true);
+  };
+
+  const pick = (b) => {
+    onPick({ brand_id: b.brand_id, name: b.name });
+    setOpen(false);
+    setSearch('');
+  };
+
+  const hasPick = brandId != null && brandName;
+
+  return (
+    <div>
+      <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
+        Marca <span className="text-red-600 dark:text-red-400">*</span>
+      </label>
+      {!categoryId ? (
+        <div className="w-full px-3 py-2 border border-dashed border-gray-300 dark:border-gray-600 rounded-lg text-xs text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800/40">
+          Escolha a categoria Shopee acima para liberar a lista de marcas.
+        </div>
+      ) : hasPick ? (
+        <div className="flex items-start gap-2 p-2 rounded-lg border border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/30">
+          <div className="flex-1 min-w-0">
+            <p className="text-sm text-gray-900 dark:text-gray-100 truncate">{brandName}</p>
+            <p className="text-[11px] font-mono text-emerald-800 dark:text-emerald-300">brand_id: {brandId}</p>
+          </div>
+          <button type="button" onClick={openPicker}
+            className="text-xs px-2 py-1 rounded border border-emerald-400 text-emerald-700 dark:text-emerald-200 hover:bg-emerald-100 dark:hover:bg-emerald-900/40">
+            Trocar
+          </button>
+          <button type="button" onClick={onClear}
+            className="text-xs px-2 py-1 rounded text-red-600 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/30">
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      ) : (
+        <button type="button" onClick={openPicker}
+          className="w-full px-3 py-2 border border-dashed border-orange-400 dark:border-orange-700 rounded-lg text-sm text-orange-700 dark:text-orange-200 bg-white dark:bg-gray-800/40 hover:bg-orange-50 dark:hover:bg-orange-950/40 flex items-center justify-center gap-2">
+          <Search className="w-4 h-4" /> Escolher marca Shopee
+        </button>
+      )}
+
+      {open && (
+        <div className="mt-2 rounded-lg border border-orange-300 dark:border-orange-700 bg-white dark:bg-gray-800 p-3 space-y-2">
+          <div className="flex items-center gap-2">
+            <Search className="w-4 h-4 text-gray-400" />
+            <input type="text" autoFocus value={search} onChange={(e) => setSearch(e.target.value)}
+              placeholder='Buscar marca (ex.: "Single Light", "Ventax"…) ou deixe vazio para ver "Sem Marca"'
+              className="flex-1 px-2 py-1.5 border dark:border-gray-600 rounded text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
+            <button type="button" onClick={() => setOpen(false)} className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700">
+              <X className="w-4 h-4 text-gray-400" />
+            </button>
+          </div>
+          <div className="max-h-56 overflow-auto border border-gray-100 dark:border-gray-700 rounded">
+            {loading ? (
+              <div className="p-3 text-xs text-gray-500 flex items-center gap-2"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Carregando marcas…</div>
+            ) : error ? (
+              <div className="p-3 text-xs space-y-1">
+                <p className="text-red-700 dark:text-red-300 font-medium">Não foi possível listar as marcas.</p>
+                <p className="text-red-600 dark:text-red-400 break-all">{error}</p>
+                <p className="text-gray-500 dark:text-gray-400">Você pode mesmo assim usar "Sem Marca" — o sistema enviará brand_id=0.</p>
+                <button type="button" onClick={() => pick({ brand_id: 0, name: 'Sem Marca' })}
+                  className="mt-1 text-xs px-3 py-1.5 rounded bg-orange-600 hover:bg-orange-700 text-white">
+                  Usar Sem Marca
+                </button>
+              </div>
+            ) : items.length === 0 ? (
+              <div className="p-3 text-xs text-gray-500">Nenhuma marca encontrada para "{search}".</div>
+            ) : items.map((b) => (
+              <button key={`${b.brand_id}-${b.name}`} type="button" onClick={() => pick(b)}
+                className="w-full text-left px-3 py-2 text-xs hover:bg-orange-50 dark:hover:bg-orange-950/30 border-b border-gray-100 dark:border-gray-700 last:border-0">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-[11px] text-gray-500 shrink-0 w-10">{b.brand_id}</span>
+                  <span className="text-gray-800 dark:text-gray-200 truncate">{b.name}</span>
+                </div>
+              </button>
+            ))}
+          </div>
+          <p className="text-[11px] text-gray-500 dark:text-gray-400">
+            A Shopee só aceita marcas oficialmente cadastradas. Se sua marca (ex.: "Single Light") não aparece, registre-a no Seller Center primeiro ou use "Sem Marca".
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Ficha técnica Shopee: lista os atributos da categoria escolhida e permite
+ * ao seller preencher valores. Suporta 2 modos:
+ *
+ *  • auto  — /get_attributes funcionou; mostramos inputs tipados (dropdown
+ *            para DROP_DOWN/COMBO_BOX, texto para INT/FLOAT/STRING_TYPE).
+ *  • manual — /get_attributes retornou 403 (API bloqueada pelo partner Shopee).
+ *            O seller insere attribute_id + valor em linhas (add/remove).
+ *            Os attribute_ids obrigatórios aparecem nos erros de publicação.
+ */
+function ShopeeAttributesBlock({ accountId, categoryId, value, onChange, autoOpenImport }) {
+  const toast = useToast();
+  const [attrs, setAttrs] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [mode, setMode] = useState('auto');
+  const [error, setError] = useState(null);
+  const [onlyMandatory, setOnlyMandatory] = useState(true);
+  const [search, setSearch] = useState('');
+  const [errorPaste, setErrorPaste] = useState('');
+  const [errorPasteOpen, setErrorPasteOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  useEffect(() => {
+    if (autoOpenImport) setImportOpen(true);
+  }, [autoOpenImport]);
+  const [importRef, setImportRef] = useState('');
+  const [importLoading, setImportLoading] = useState(false);
+  const [importSuggestions, setImportSuggestions] = useState([]);
+  const [importSuggestionsLoading, setImportSuggestionsLoading] = useState(false);
+  const [pasteJsonOpen, setPasteJsonOpen] = useState(false);
+  const [pasteJsonText, setPasteJsonText] = useState('');
+  const [pasteJsonLoading, setPasteJsonLoading] = useState(false);
+
+  // Salva um override manual de atributos para a categoria a partir de um JSON
+  // copiado do DevTools do Seller Center Shopee. Após salvar, recarrega os
+  // atributos para usar a lista oficial.
+  const submitPasteJson = async () => {
+    if (!pasteJsonText.trim()) { toast.error('Cole o JSON primeiro.'); return; }
+    if (!categoryId) { toast.error('Selecione uma categoria primeiro.'); return; }
+    setPasteJsonLoading(true);
+    try {
+      const r = await axios.post(`/api/shopee/categories/${categoryId}/attributes/override`, {
+        raw: pasteJsonText,
+      });
+      toast.success(`${r.data.total} atributo(s) salvos — ${r.data.with_value_ids} com value_ids oficiais.`);
+      setPasteJsonText('');
+      setPasteJsonOpen(false);
+      // Recarrega a lista de atributos pra pegar o override recém salvo.
+      try {
+        const fresh = await axios.get(`/api/shopee/categories/${categoryId}/attributes`, { params: { accountId } });
+        setAttrs(Array.isArray(fresh.data?.attributes) ? fresh.data.attributes : []);
+        setMode('auto');
+      } catch (_) {}
+    } catch (err) {
+      const msg = err.response?.data?.error || err.message;
+      toast.error(`Falha ao processar JSON: ${msg}`, { duration: 15000 });
+    } finally {
+      setPasteJsonLoading(false);
+    }
+  };
+
+  // Importa atributos de um anúncio Shopee já publicado (item_id ou URL).
+  // Necessário porque o get_attribute_tree pode estar bloqueado, e get_item_base_info
+  // com need_attribute=true retorna os value_ids oficiais que a Shopee aceita.
+  const importFromItem = async (ref) => {
+    const r = (ref || importRef).trim();
+    if (!r) { toast.error('Informe o item_id ou cole a URL do anúncio Shopee.'); return; }
+    setImportLoading(true);
+    try {
+      const resp = await axios.get(`/api/shopee/items/${encodeURIComponent(r)}/attributes`, { params: { accountId } });
+      const imported = Array.isArray(resp.data?.attributes) ? resp.data.attributes : [];
+      if (!imported.length) {
+        toast.info('O anúncio encontrado não tinha ficha técnica preenchida.');
+      } else {
+        const current = { ...(value || {}) };
+        let added = 0;
+        for (const a of imported) {
+          if (a.value_id != null && a.value_id !== 0) {
+            current[String(a.attribute_id)] = {
+              value_id: a.value_id,
+              original_value_name: a.original_value_name || a.display_value_name || '',
+              _suggested_name: a.name,
+            };
+            added++;
+          } else if (a.original_value_name || a.display_value_name) {
+            current[String(a.attribute_id)] = {
+              original_value_name: a.original_value_name || a.display_value_name,
+              _suggested_name: a.name,
+            };
+            added++;
+          }
+        }
+        onChange(current);
+        const persisted = resp.data?.persisted;
+        if (persisted && persisted.defaults_upserted > 0) {
+          toast.success(`${added} atributo(s) importado(s) e salvos como padrão desta categoria. Próximos modelos vão abrir já preenchidos.`, { duration: 6000 });
+        } else {
+          toast.success(`${added} atributo(s) importado(s) com value_ids oficiais da Shopee.`);
+        }
+        setImportOpen(false);
+        setImportRef('');
+      }
+    } catch (err) {
+      const msg = err.response?.data?.error || err.message;
+      toast.error(`Falha ao importar: ${msg}`);
+    } finally {
+      setImportLoading(false);
+    }
+  };
+
+  // Quando abrir a modal de import, carrega sugestões da própria loja na categoria.
+  useEffect(() => {
+    if (!importOpen || !accountId) return;
+    let cancelled = false;
+    (async () => {
+      setImportSuggestionsLoading(true);
+      try {
+        const r = await axios.get('/api/shopee/items/by-category', {
+          params: { accountId, categoryId, pageSize: 50 },
+        });
+        if (cancelled) return;
+        setImportSuggestions(Array.isArray(r.data?.items) ? r.data.items : []);
+      } catch {
+        if (!cancelled) setImportSuggestions([]);
+      } finally {
+        if (!cancelled) setImportSuggestionsLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [importOpen, accountId, categoryId]);
+
+  // Extrai pares (attribute_id, name) de uma mensagem de erro crua da Shopee.
+  // Aceita formatos como:
+  //   "Attribute is mandatory: id: 102385, name: Electrical Cables"
+  //   '"msg":"Attribute is mandatory: id: 100408, name: Connection Type"'
+  //   'Attribute "Electrical Cables" is mandatory required'
+  const parseShopeeErrorMessage = (raw) => {
+    if (!raw) return [];
+    const found = new Map();
+    const reIdName = /id[:\s]+(\d+)\s*,\s*name[:\s]+([^"}\n]+?)(?=["}\n,]|$)/gi;
+    let m;
+    while ((m = reIdName.exec(raw)) !== null) {
+      const id = m[1].trim();
+      const name = m[2].trim();
+      if (id && !found.has(id)) found.set(id, name);
+    }
+    // Fallback: capturar "Attribute "Xxx" is mandatory" sem ID numérico — nesse
+    // caso criamos um ID negativo temporário só pra o seller saber que falta.
+    const reNameOnly = /Attribute\s+"([^"]+)"\s+is\s+mandatory/gi;
+    while ((m = reNameOnly.exec(raw)) !== null) {
+      const name = m[1].trim();
+      const hasId = [...found.values()].some(v => v.toLowerCase() === name.toLowerCase());
+      if (!hasId && name) {
+        // Placeholder — o seller precisa descobrir o ID. Mostramos o nome mesmo assim.
+        const placeholder = `pendente_${name.toLowerCase().replace(/\s+/g, '_')}`;
+        if (!found.has(placeholder)) found.set(placeholder, name);
+      }
+    }
+    return Array.from(found.entries()).map(([id, name]) => ({ attribute_id: id, name }));
+  };
+
+  const applyErrorPaste = () => {
+    const parsed = parseShopeeErrorMessage(errorPaste);
+    if (!parsed.length) {
+      toast.error('Não consegui identificar IDs de atributo nessa mensagem. Cole o "debug_message" completo do erro.');
+      return;
+    }
+    const current = { ...(value || {}) };
+    let added = 0;
+    for (const p of parsed) {
+      // Só adiciona IDs numéricos (ignora os placeholders sem ID).
+      if (!/^\d+$/.test(p.attribute_id)) continue;
+      if (!current[p.attribute_id]) {
+        current[p.attribute_id] = { original_value_name: '', _suggested_name: p.name };
+        added++;
+      }
+    }
+    if (added === 0) {
+      toast.info('Todos os IDs já estavam na lista.');
+    } else {
+      toast.success(`${added} atributo(s) adicionado(s). Preencha os valores e salve.`);
+      setErrorPaste('');
+      setErrorPasteOpen(false);
+    }
+    onChange(current);
+  };
+
+  useEffect(() => {
+    if (!accountId || !categoryId) {
+      setAttrs([]); setMode('auto'); setError(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const r = await axios.get(`/api/shopee/categories/${categoryId}/attributes`, { params: { accountId } });
+        if (cancelled) return;
+        const list = Array.isArray(r.data?.attributes) ? r.data.attributes : [];
+        setAttrs(list);
+        setMode('auto');
+        // Pré-preenchimento a partir dos defaults salvos pela categoria (vêm
+        // do último import/merge). Só preenche campos VAZIOS — se o seller
+        // já configurou algo no modelo, respeita a escolha dele.
+        const currentValue = value || {};
+        const prefill = {};
+        for (const a of list) {
+          const cur = currentValue[String(a.attribute_id)];
+          const hasVal = cur && (cur.value_id != null || cur.original_value_name);
+          if (hasVal) continue;
+          if (a.default && (a.default.value_id != null || a.default.original_value_name)) {
+            prefill[String(a.attribute_id)] = {
+              ...(a.default.value_id != null ? { value_id: a.default.value_id } : {}),
+              ...(a.default.original_value_name ? { original_value_name: a.default.original_value_name } : {}),
+              ...(a.default.value_unit ? { value_unit: a.default.value_unit } : {}),
+              _suggested_name: a.default.display_value_name || a.default.original_value_name || a.name,
+              _from_category_default: true,
+            };
+          }
+        }
+        if (Object.keys(prefill).length > 0) {
+          onChange({ ...currentValue, ...prefill });
+        }
+      } catch (e) {
+        if (cancelled) return;
+        const blocked = e.response?.status === 424 || e.response?.data?.error === 'blocked';
+        setError({
+          blocked,
+          message: e.response?.data?.message || e.response?.data?.error || e.message,
+        });
+        setMode(blocked ? 'manual' : 'manual');
+        setAttrs([]);
+      }
+      if (!cancelled) setLoading(false);
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountId, categoryId]);
+
+  const updateAttr = (attrId, patch) => {
+    const current = { ...(value || {}) };
+    const prev = current[String(attrId)] || {};
+    const merged = { ...prev, ...patch };
+    // Se o usuário limpou tudo, remove a entrada.
+    if (!merged.original_value_name && merged.value_id == null) {
+      delete current[String(attrId)];
+    } else {
+      current[String(attrId)] = merged;
+    }
+    onChange(current);
+  };
+
+  const removeAttr = (attrId) => {
+    const current = { ...(value || {}) };
+    delete current[String(attrId)];
+    onChange(current);
+  };
+
+  // Mescla atributos retornados pela API com IDs que o seller já configurou
+  // (ou que foram pré-preenchidos pelo erro de publicação). Assim nenhum ID
+  // fica invisível mesmo se a API Shopee não retornar aquele atributo.
+  const attrsById = new Map(attrs.map(a => [String(a.attribute_id), a]));
+  for (const [idStr, v] of Object.entries(value || {})) {
+    if (!attrsById.has(idStr)) {
+      attrsById.set(idStr, {
+        attribute_id: parseInt(idStr, 10),
+        name: v._suggested_name || `Atributo ${idStr}`,
+        is_mandatory: !!v._suggested_name,
+        input_type: 'TEXT_FILED',
+        values: [],
+        _synthetic: true,
+      });
+    }
+  }
+  const mergedAttrs = Array.from(attrsById.values());
+  const filtered = mergedAttrs.filter(a => {
+    if (onlyMandatory && !a.is_mandatory) return false;
+    const s = search.trim().toLowerCase();
+    if (!s) return true;
+    return a.name.toLowerCase().includes(s) || String(a.attribute_id).includes(s);
+  });
+
+  if (!categoryId) {
+    return (
+      <div className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800/40 p-3">
+        <div className="flex items-center gap-2 mb-1">
+          <span className="text-sm font-semibold text-gray-800 dark:text-gray-200">Ficha técnica Shopee</span>
+        </div>
+        <p className="text-xs text-gray-500 dark:text-gray-400">Escolha a categoria Shopee acima para ver os atributos obrigatórios.</p>
+      </div>
+    );
+  }
+
+  const filledCount = Object.keys(value || {}).length;
+  const mandatoryCount = mergedAttrs.filter(a => a.is_mandatory).length;
+  const manualEntries = Object.entries(value || {});
+
+  return (
+    <div className="rounded-lg border border-amber-200 dark:border-amber-800 bg-amber-50/40 dark:bg-amber-950/20 p-3 space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="text-sm font-semibold text-gray-800 dark:text-gray-200">Ficha técnica Shopee</p>
+          <p className="text-[11px] text-gray-600 dark:text-gray-400">
+            {mode === 'auto'
+              ? <>Atributos obrigatórios da categoria Shopee. Preenchidos: <span className="font-mono">{filledCount}</span> / <span className="font-mono">{mandatoryCount}</span> obrigatórios.</>
+              : <>Modo manual — o partner Shopee do miti não tem permissão "Product Info". Informe os atributos manualmente (os IDs aparecem nas mensagens de erro ao publicar).</>}
+          </p>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            type="button"
+            onClick={() => setImportOpen(true)}
+            className="px-2 py-1 rounded bg-orange-500 hover:bg-orange-600 text-white text-[11px] font-medium flex items-center gap-1"
+            title="Copiar a ficha técnica (com value_ids oficiais) de um anúncio Shopee já publicado"
+          >
+            <Copy className="w-3 h-3" /> Importar de anúncio Shopee
+          </button>
+          {mode === 'auto' && attrs.length > 0 && (
+            <label className="flex items-center gap-1 text-[11px] text-gray-600 dark:text-gray-400">
+              <input type="checkbox" checked={onlyMandatory} onChange={(e) => setOnlyMandatory(e.target.checked)} />
+              Só obrigatórios
+            </label>
+          )}
+        </div>
+      </div>
+
+      {importOpen && (
+        <div className="rounded border border-orange-300 dark:border-orange-700 bg-orange-50 dark:bg-orange-900/20 p-3 space-y-2">
+          <div className="flex items-start justify-between gap-2">
+            <div className="space-y-1.5">
+              <p className="text-xs font-semibold text-orange-900 dark:text-orange-200">Importar ficha técnica de um anúncio Shopee existente</p>
+              <p className="text-[11px] text-orange-800 dark:text-orange-300">
+                Cole a URL do anúncio Shopee (ex.: <code>https://shopee.com.br/…-i.1234.5678</code>) <strong>ou</strong> só o item_id.
+                A loja conectada precisa ser dona desse anúncio (é seu próprio item já publicado nesta categoria).
+              </p>
+              <div className="rounded border border-orange-300 bg-white/60 dark:bg-orange-950/30 p-2 text-[11px] text-orange-900 dark:text-orange-200 space-y-1">
+                <p className="font-semibold">É o seu 1º anúncio nesta categoria?</p>
+                <ol className="list-decimal pl-4 space-y-0.5">
+                  <li>Acesse o <a href="https://banxa.shopee.com.br/portal/product/list" target="_blank" rel="noopener noreferrer" className="underline font-medium">Seller Center Shopee</a> no navegador.</li>
+                  <li>Crie e publique 1 produto simples nesta mesma categoria preenchendo os atributos obrigatórios manualmente.</li>
+                  <li>Volte aqui e importe por URL (ou escolha na lista abaixo) — os value_ids oficiais vão ser copiados pro miti.</li>
+                  <li>Pronto: todos os próximos anúncios dessa categoria vão funcionar direto daqui.</li>
+                </ol>
+              </div>
+            </div>
+            <button type="button" onClick={() => { setImportOpen(false); setImportRef(''); }}
+              className="text-orange-900 dark:text-orange-200 hover:opacity-70"><X className="w-4 h-4" /></button>
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={importRef}
+              onChange={(e) => setImportRef(e.target.value)}
+              placeholder="URL do anúncio Shopee ou item_id"
+              className="flex-1 px-2 py-1.5 border dark:border-gray-600 rounded text-xs bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+              onKeyDown={(e) => { if (e.key === 'Enter') importFromItem(); }}
+            />
+            <button
+              type="button"
+              disabled={importLoading || !importRef.trim()}
+              onClick={() => importFromItem()}
+              className="px-3 py-1.5 rounded bg-orange-600 text-white text-xs font-semibold hover:bg-orange-700 disabled:opacity-50 flex items-center gap-1"
+            >
+              {importLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+              Importar
+            </button>
+          </div>
+          <div className="pt-1 border-t border-orange-300 dark:border-orange-700">
+            <button
+              type="button"
+              onClick={() => setPasteJsonOpen(v => !v)}
+              className="text-[11px] font-medium text-orange-900 dark:text-orange-200 hover:underline flex items-center gap-1"
+            >
+              {pasteJsonOpen ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+              Alternativa avançada: colar JSON do Seller Center (DevTools)
+            </button>
+            {pasteJsonOpen && (
+              <div className="mt-2 space-y-2 rounded border border-orange-300 dark:border-orange-700 bg-white/70 dark:bg-gray-800/60 p-2">
+                <ol className="list-decimal pl-4 text-[11px] text-orange-900 dark:text-orange-200 space-y-0.5">
+                  <li>Abra <a href="https://banxa.shopee.com.br/portal/product/new" target="_blank" rel="noopener noreferrer" className="underline font-medium">Seller Center → Adicionar Produto</a> e escolha a mesma categoria deste modelo.</li>
+                  <li>Aperte <kbd className="px-1 bg-gray-200 dark:bg-gray-700 rounded font-mono text-[10px]">F12</kbd> para abrir DevTools → aba <strong>Network</strong> → filtre por <code className="bg-gray-100 dark:bg-gray-700 px-1 rounded">attribute</code>.</li>
+                  <li>Role ou clique em qualquer dropdown da Shopee; alguma requisição com "get_attribute" aparece. Clique nela → aba <strong>Response</strong>.</li>
+                  <li>Selecione todo o JSON (Ctrl+A), copie (Ctrl+C) e cole aqui embaixo.</li>
+                </ol>
+                <textarea
+                  value={pasteJsonText}
+                  onChange={(e) => setPasteJsonText(e.target.value)}
+                  placeholder='Cole aqui o JSON da resposta (ex.: {"data":{"attribute_list":[...]}})'
+                  rows={6}
+                  className="w-full px-2 py-1.5 border dark:border-gray-600 rounded text-[11px] font-mono bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100"
+                />
+                <div className="flex items-center justify-end gap-2">
+                  <button type="button" onClick={() => { setPasteJsonText(''); setPasteJsonOpen(false); }}
+                    className="px-2 py-1 text-[11px] text-orange-900 dark:text-orange-200 hover:underline">Cancelar</button>
+                  <button type="button" disabled={pasteJsonLoading || !pasteJsonText.trim()} onClick={submitPasteJson}
+                    className="px-3 py-1 rounded bg-orange-600 hover:bg-orange-700 text-white text-[11px] font-semibold disabled:opacity-50 flex items-center gap-1">
+                    {pasteJsonLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Upload className="w-3 h-3" />}
+                    Salvar ficha da categoria
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="pt-1">
+            <p className="text-[11px] font-medium text-orange-900 dark:text-orange-200 mb-1">Ou escolha um anúncio seu desta categoria:</p>
+            {importSuggestionsLoading ? (
+              <div className="flex items-center gap-1 text-[11px] text-orange-800"><Loader2 className="w-3 h-3 animate-spin" /> buscando…</div>
+            ) : importSuggestions.length === 0 ? (
+              <p className="text-[11px] text-orange-800/80 dark:text-orange-300/80">Nenhum anúncio ativo da sua loja nessa categoria.</p>
+            ) : (
+              <div className="max-h-28 overflow-auto space-y-1">
+                {importSuggestions.map(it => (
+                  <button
+                    key={it.item_id}
+                    type="button"
+                    onClick={() => importFromItem(String(it.item_id))}
+                    disabled={importLoading}
+                    className="w-full text-left px-2 py-1 rounded bg-white dark:bg-gray-800 border border-orange-200 dark:border-orange-800 hover:bg-orange-100 dark:hover:bg-orange-900/30 text-[11px] flex items-center justify-between gap-2 disabled:opacity-50"
+                  >
+                    <span className="truncate">{it.item_name}</span>
+                    <span className="font-mono text-[10px] text-gray-500 shrink-0">#{it.item_id}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {loading && (
+        <div className="flex items-center gap-2 text-xs text-gray-500"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Carregando ficha técnica…</div>
+      )}
+
+      {!loading && mode === 'auto' && (
+        <>
+          {mergedAttrs.length === 0 ? (
+            <div className="rounded border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-3 space-y-2 text-[11px] text-amber-900 dark:text-amber-200">
+              <p>A Shopee não retornou atributos para essa categoria. Isso pode ser:</p>
+              <ul className="list-disc pl-4 space-y-0.5">
+                <li>Permissão "Product Info" do app Shopee não aprovada.</li>
+                <li>Categoria realmente sem atributos obrigatórios (raro).</li>
+              </ul>
+              <p className="pt-1">Tente publicar mesmo assim — se a Shopee reclamar algum atributo obrigatório, o miti vai <strong>pré-popular o ID aqui automaticamente</strong> pra você só preencher o valor.</p>
+              <button type="button" onClick={() => setMode('manual')}
+                className="mt-1 px-2 py-1 rounded bg-amber-600 text-white text-[11px] font-medium hover:bg-amber-700">
+                Configurar manualmente
+              </button>
+            </div>
+          ) : (
+            <>
+              {mergedAttrs.some(a => a.from_static_catalog) && (
+                <div className="rounded border border-amber-300 dark:border-amber-700 bg-amber-100/70 dark:bg-amber-900/30 p-2.5 space-y-1.5">
+                  <p className="text-[11px] font-semibold text-amber-900 dark:text-amber-200 flex items-center gap-1">
+                    <AlertTriangle className="w-3.5 h-3.5" /> Atenção: atributos "Sugerido" não têm o value_id oficial da Shopee
+                  </p>
+                  <p className="text-[11px] text-amber-800 dark:text-amber-300">
+                    Como a API Shopee está bloqueada para este app, o miti está mostrando as opções comuns dessa categoria, mas <strong>sem o ID numérico oficial</strong>. Para atributos de dropdown fechado (ex.: "Connection Type"), a Shopee rejeita a publicação com "value cannot be customized".
+                  </p>
+                  <p className="text-[11px] text-amber-800 dark:text-amber-300">
+                    <strong>Solução:</strong> clique em <em>"Importar de anúncio Shopee"</em> acima e cole o link de um anúncio seu já publicado nessa categoria — o miti copia os value_ids corretos. Se for o seu primeiro item, publique pelo Seller Center web uma vez e depois use a importação aqui pros próximos.
+                  </p>
+                </div>
+              )}
+              <div className="flex items-center gap-2">
+                <Search className="w-4 h-4 text-gray-400" />
+                <input type="text" value={search} onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Buscar atributo…"
+                  className="flex-1 px-2 py-1.5 border dark:border-gray-600 rounded text-xs bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-[420px] overflow-auto pr-1">
+                {filtered.map((a) => {
+                  const cur = value?.[String(a.attribute_id)] || {};
+                  const hasOptions = a.values && a.values.length > 0;
+                  // Detecta se os options são do catálogo manual (sem value_id real).
+                  // Nesse caso, usamos o original_name como chave do select (a
+                  // Shopee casa pelo nome em inglês) em vez do value_id=0.
+                  const catalogMode = hasOptions && a.values.every(v => !v.value_id);
+                  const selectedKey = catalogMode
+                    ? (cur.original_value_name || '')
+                    : (cur.value_id != null ? String(cur.value_id) : '');
+                  return (
+                    <div key={a.attribute_id} className="rounded border border-amber-200 dark:border-amber-800 bg-white dark:bg-gray-800/60 p-2">
+                      <div className="flex items-start justify-between gap-1 mb-1">
+                        <div className="min-w-0">
+                          <p className="text-xs font-medium text-gray-800 dark:text-gray-200 truncate flex items-center gap-1.5">
+                            {a.name}
+                            {a.is_mandatory && <span className="text-[9px] px-1 py-0.5 rounded bg-red-100 dark:bg-red-900/50 text-red-700 dark:text-red-300">Obrigatório</span>}
+                            {a.from_static_catalog && <span className="text-[9px] px-1 py-0.5 rounded bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300" title="Opções curadas pelo miti porque a API Shopee não está respondendo">Sugerido</span>}
+                            {catalogMode && cur.original_value_name && (cur.value_id == null || cur.value_id === 0) && (
+                              <span className="text-[9px] px-1 py-0.5 rounded bg-red-100 dark:bg-red-900/50 text-red-700 dark:text-red-300" title="Dropdown fechado: Shopee vai rejeitar publish sem o value_id oficial">⚠ value_id faltando</span>
+                            )}
+                          </p>
+                          <p className="text-[10px] font-mono text-gray-400">id {a.attribute_id} · {a.input_type || '—'}</p>
+                        </div>
+                      </div>
+                      {hasOptions ? (
+                        <div className="space-y-1">
+                          <select value={selectedKey}
+                            onChange={(e) => {
+                              const key = e.target.value;
+                              if (!key) { removeAttr(a.attribute_id); return; }
+                              if (catalogMode) {
+                                const match = a.values.find(v => (v.original_name || v.name) === key);
+                                updateAttr(a.attribute_id, {
+                                  value_id: null,
+                                  original_value_name: match?.original_name || match?.name || key,
+                                });
+                              } else {
+                                const match = a.values.find(v => String(v.value_id) === key);
+                                updateAttr(a.attribute_id, {
+                                  value_id: Number(key),
+                                  original_value_name: match?.original_name || match?.name || '',
+                                });
+                              }
+                            }}
+                            className="w-full px-2 py-1 border dark:border-gray-600 rounded text-xs bg-white dark:bg-gray-700 text-gray-900 dark:text-white">
+                            <option value="">— Selecione —</option>
+                            {a.values.map((v, idx) => {
+                              const key = catalogMode ? (v.original_name || v.name) : String(v.value_id);
+                              const label = catalogMode && v.name !== v.original_name && v.original_name
+                                ? `${v.name} (${v.original_name})`
+                                : v.name;
+                              return <option key={`${a.attribute_id}-${idx}`} value={key}>{label}</option>;
+                            })}
+                          </select>
+                          {catalogMode && cur.original_value_name && (
+                            <div className="flex items-center gap-1">
+                              <input
+                                type="number"
+                                value={cur.value_id ?? ''}
+                                onChange={(e) => {
+                                  const v = e.target.value.trim();
+                                  updateAttr(a.attribute_id, { value_id: v ? Number(v) : null });
+                                }}
+                                placeholder="value_id oficial (opcional)"
+                                className="flex-1 px-1.5 py-0.5 border dark:border-gray-600 rounded text-[10px] bg-white dark:bg-gray-700 text-gray-900 dark:text-white font-mono"
+                                title="Se você souber o value_id oficial da Shopee para esta opção, informe aqui. Sem ele, dropdowns fechados podem ser rejeitados."
+                              />
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="flex gap-1">
+                          <input type="text" value={cur.original_value_name || ''}
+                            onChange={(e) => updateAttr(a.attribute_id, { value_id: null, original_value_name: e.target.value })}
+                            placeholder="Valor"
+                            className="flex-1 px-2 py-1 border dark:border-gray-600 rounded text-xs bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
+                          {a.attribute_unit && a.attribute_unit.length > 0 && (
+                            <select value={cur.value_unit || ''} onChange={(e) => updateAttr(a.attribute_id, { value_unit: e.target.value })}
+                              className="px-2 py-1 border dark:border-gray-600 rounded text-xs bg-white dark:bg-gray-700 text-gray-900 dark:text-white">
+                              <option value="">—</option>
+                              {a.attribute_unit.map(u => (<option key={u} value={u}>{u}</option>))}
+                            </select>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </>
+      )}
+
+      {!loading && mode === 'manual' && (
+        <>
+          {error?.blocked && (
+            <div className="rounded border border-amber-300 dark:border-amber-700 bg-amber-100 dark:bg-amber-900/30 p-2 text-[11px] text-amber-900 dark:text-amber-100 space-y-1.5">
+              <p className="font-medium">A Shopee não retornou a lista de atributos dessa categoria.</p>
+              <p className="whitespace-pre-wrap break-words">{error.message}</p>
+              <p className="text-[10px] opacity-80">
+                Dica prática: <strong>tente publicar o modelo normalmente</strong>. Quando a Shopee recusar por atributo obrigatório, o miti abre essa aba aqui com os IDs já prontos — você só precisa preencher o valor e tentar de novo.
+              </p>
+            </div>
+          )}
+          {error && !error.blocked && (
+            <div className="rounded border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20 p-2 text-[11px] text-red-700 dark:text-red-300 break-words">
+              Erro: {error.message}
+            </div>
+          )}
+
+          {/* Atalho: colar mensagem de erro da Shopee pra extrair IDs de atributos obrigatórios */}
+          <div className="rounded border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20 p-2">
+            <button type="button"
+              onClick={() => setErrorPasteOpen(!errorPasteOpen)}
+              className="w-full flex items-center justify-between text-[11px] font-medium text-blue-800 dark:text-blue-200">
+              <span className="flex items-center gap-1.5">
+                <ChevronRight className={`w-3 h-3 transition-transform ${errorPasteOpen ? 'rotate-90' : ''}`} />
+                Colar mensagem de erro da Shopee para extrair IDs automaticamente
+              </span>
+              <span className="text-[10px] opacity-70">(atalho)</span>
+            </button>
+            {errorPasteOpen && (
+              <div className="mt-2 space-y-1.5">
+                <p className="text-[10px] text-blue-900 dark:text-blue-100 leading-relaxed">
+                  Cole aqui o <span className="font-mono">debug_message</span> completo de uma tentativa de publicação que falhou.
+                  O miti vai extrair automaticamente os <span className="font-mono">attribute_id</span> e nomes obrigatórios e criar as linhas abaixo.
+                </p>
+                <textarea value={errorPaste} onChange={(e) => setErrorPaste(e.target.value)}
+                  rows={4}
+                  placeholder='Ex.: Failed to create product : validation: [Rule Type: classification.attribute.mandatory, Detail: {"code":100010237,"msg":"Attribute is mandatory: id: 102385, name: Electrical Cables"}] ...'
+                  className="w-full px-2 py-1.5 border dark:border-gray-600 rounded text-[11px] bg-white dark:bg-gray-700 text-gray-900 dark:text-white font-mono" />
+                <div className="flex gap-1.5">
+                  <button type="button" onClick={applyErrorPaste}
+                    className="px-2 py-1 rounded bg-blue-600 text-white text-[11px] font-medium hover:bg-blue-700">
+                    Extrair IDs e adicionar
+                  </button>
+                  <button type="button" onClick={() => { setErrorPaste(''); setErrorPasteOpen(false); }}
+                    className="px-2 py-1 rounded border border-blue-300 dark:border-blue-700 text-blue-700 dark:text-blue-300 text-[11px] hover:bg-blue-100 dark:hover:bg-blue-900/30">
+                    Cancelar
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="space-y-1.5 max-h-[360px] overflow-auto pr-1">
+            {manualEntries.length === 0 ? (
+              <p className="text-xs text-gray-500">Nenhum atributo configurado ainda. Clique em "Adicionar atributo".</p>
+            ) : manualEntries.map(([attrIdStr, v]) => (
+              <div key={attrIdStr} className="rounded border border-amber-200 dark:border-amber-800 bg-white dark:bg-gray-800/60 p-2">
+                {v._suggested_name && (
+                  <p className="text-[11px] font-medium text-amber-900 dark:text-amber-200 mb-1 flex items-center gap-1">
+                    <span className="text-[9px] px-1 py-0.5 rounded bg-red-100 dark:bg-red-900/50 text-red-700 dark:text-red-300">Obrigatório</span>
+                    {v._suggested_name}
+                  </p>
+                )}
+                <div className="flex items-center gap-1.5">
+                  <input type="number" value={attrIdStr}
+                    onChange={(e) => {
+                      const newId = e.target.value;
+                      const current = { ...(value || {}) };
+                      delete current[attrIdStr];
+                      if (newId) current[newId] = v;
+                      onChange(current);
+                    }}
+                    placeholder="attribute_id"
+                    title="ID oficial da Shopee para esse atributo"
+                    className="w-28 px-2 py-1 border dark:border-gray-600 rounded text-xs bg-white dark:bg-gray-700 text-gray-900 dark:text-white font-mono" />
+                  <input type="text" value={v.original_value_name || ''}
+                    onChange={(e) => updateAttr(parseInt(attrIdStr, 10), { value_id: v.value_id ?? null, original_value_name: e.target.value, _suggested_name: v._suggested_name })}
+                    placeholder={v._suggested_name ? `Valor de "${v._suggested_name}"` : 'Valor (ex.: "Plástico", "2 metros", "Não")'}
+                    className="flex-1 px-2 py-1 border dark:border-gray-600 rounded text-xs bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
+                  <input type="number" value={v.value_id ?? ''}
+                    onChange={(e) => updateAttr(parseInt(attrIdStr, 10), { value_id: e.target.value === '' ? null : Number(e.target.value), original_value_name: v.original_value_name || '', _suggested_name: v._suggested_name })}
+                    placeholder="value_id"
+                    title="Opcional: ID oficial do valor na Shopee. Se deixado vazio, mandamos só o texto."
+                    className="w-24 px-2 py-1 border dark:border-gray-600 rounded text-xs bg-white dark:bg-gray-700 text-gray-900 dark:text-white font-mono" />
+                  <button type="button" onClick={() => removeAttr(parseInt(attrIdStr, 10))}
+                    className="p-1 rounded text-red-600 hover:bg-red-50 dark:hover:bg-red-900/30">
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+          <button type="button" onClick={() => {
+            const existing = new Set(Object.keys(value || {}));
+            let next = 100001;
+            while (existing.has(String(next))) next++;
+            updateAttr(next, { original_value_name: '' });
+          }}
+            className="text-xs px-3 py-1.5 rounded bg-amber-600 hover:bg-amber-700 text-white inline-flex items-center gap-1.5">
+            + Adicionar atributo manual
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Bloco da aba Mapeamento dedicado à Shopee. Inclui autocomplete de categoria
+ * alimentado por /api/shopee/categories (árvore oficial da Shopee por loja).
+ * Recebe:
+ *  - channel: objeto {category_id, category_name, title_override, notes, ...}
+ *  - mlCategoryName: nome humano da categoria ML (usado como sugestão de busca)
+ *  - shopeeAccounts: lista de contas conectadas
+ *  - onChange(patch): mescla patch em channel
+ */
+function ShopeeMappingBlock({ channel, mlCategoryName, mlCategoryId, shopeeAccounts, onChange }) {
+  const [accountId, setAccountId] = useState(shopeeAccounts[0]?.id || '');
+  const [search, setSearch] = useState('');
+  const [suggestions, setSuggestions] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [showPicker, setShowPicker] = useState(false);
+  const [apiError, setApiError] = useState(null);
+  const [manualId, setManualId] = useState('');
+
+  useEffect(() => {
+    if (!accountId && shopeeAccounts.length > 0) setAccountId(shopeeAccounts[0].id);
+  }, [shopeeAccounts, accountId]);
+
+  useEffect(() => {
+    if (!showPicker || !accountId) return;
+    const tid = setTimeout(async () => {
+      setLoading(true);
+      setApiError(null);
+      try {
+        const r = await axios.get('/api/shopee/categories', { params: { accountId, search } });
+        setSuggestions(Array.isArray(r.data?.items) ? r.data.items : []);
+      } catch (e) {
+        setSuggestions([]);
+        setApiError(e.response?.data || { error: e.message });
+      }
+      setLoading(false);
+    }, 260);
+    return () => clearTimeout(tid);
+  }, [search, accountId, showPicker]);
+
+  const applyCategory = (cat) => {
+    onChange({ category_id: cat.category_id, category_name: cat.path || cat.display_name || cat.name });
+    setShowPicker(false);
+    setSearch('');
+  };
+
+  const openPicker = () => {
+    if (!accountId) return;
+    const hint = mlCategoryName ? mlCategoryName.split('>').pop().trim() : '';
+    setSearch(hint);
+    setShowPicker(true);
+  };
+
+  return (
+    <div className="rounded-xl border border-orange-200 dark:border-orange-800 bg-orange-50/40 dark:bg-orange-950/20 p-4 space-y-3">
+      <div className="flex items-center gap-2">
+        <img src="/shopee.png" alt="" className="w-6 h-6 rounded-sm object-contain" />
+        <span className="font-semibold text-gray-900 dark:text-white">Shopee</span>
+      </div>
+
+      {shopeeAccounts.length === 0 ? (
+        <div className="rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/30 p-2 text-xs text-amber-800 dark:text-amber-200">
+          Conecte uma conta Shopee para poder escolher a categoria direto da árvore oficial.
+        </div>
+      ) : (
+        <div>
+          <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Conta usada para listar categorias</label>
+          <select value={accountId} onChange={(e) => setAccountId(e.target.value)}
+            className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white">
+            {shopeeAccounts.map((acc) => (
+              <option key={acc.id} value={acc.id}>{acc.name || `Shopee ${acc.id}`}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      <div>
+        <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Categoria na Shopee</label>
+        {channel.category_id ? (
+          <div className="flex items-start gap-2 p-2 rounded-lg border border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/30">
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-mono text-emerald-800 dark:text-emerald-300">{channel.category_id}</p>
+              {channel.category_name && <p className="text-xs text-gray-700 dark:text-gray-200 mt-0.5">{channel.category_name}</p>}
+            </div>
+            <button type="button" onClick={openPicker} disabled={!accountId}
+              className="text-xs px-2 py-1 rounded border border-emerald-400 text-emerald-700 dark:text-emerald-200 hover:bg-emerald-100 dark:hover:bg-emerald-900/40 disabled:opacity-40">
+              Trocar
+            </button>
+            <button type="button" onClick={() => onChange({ category_id: '', category_name: '' })}
+              className="text-xs px-2 py-1 rounded text-red-600 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/30">
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        ) : (
+          <button type="button" onClick={openPicker} disabled={!accountId}
+            className="w-full px-3 py-2 border border-dashed border-orange-400 dark:border-orange-700 rounded-lg text-sm text-orange-700 dark:text-orange-200 bg-white dark:bg-gray-800/40 hover:bg-orange-50 dark:hover:bg-orange-950/40 flex items-center justify-center gap-2 disabled:opacity-40">
+            <Search className="w-4 h-4" /> Escolher categoria Shopee
+          </button>
+        )}
+        <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-1">
+          A Shopee tem a própria árvore de categorias. O miti busca a árvore da loja conectada e sugere uma pelo nome da categoria que você escolheu no Mercado Livre.
+          {mlCategoryName && <> Categoria ML atual: <span className="italic">{mlCategoryName}</span>.</>}
+        </p>
+      </div>
+
+      {showPicker && (
+        <div className="rounded-lg border border-orange-300 dark:border-orange-700 bg-white dark:bg-gray-800 p-3 space-y-2">
+          <div className="flex items-center gap-2">
+            <Search className="w-4 h-4 text-gray-400" />
+            <input type="text" autoFocus value={search} onChange={(e) => setSearch(e.target.value)}
+              placeholder="Digite parte do nome (ex.: luminária, luminaria de teto)…"
+              className="flex-1 px-2 py-1.5 border dark:border-gray-600 rounded text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
+            <button type="button" onClick={() => setShowPicker(false)} className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700">
+              <X className="w-4 h-4 text-gray-400" />
+            </button>
+          </div>
+          <div className="max-h-52 overflow-auto border border-gray-100 dark:border-gray-700 rounded">
+            {loading ? (
+              <div className="p-3 text-xs text-gray-500 flex items-center gap-2"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Carregando categorias Shopee…</div>
+            ) : apiError ? (
+              <div className="p-3 text-xs space-y-1">
+                <p className="text-red-700 dark:text-red-300 font-medium">A Shopee recusou a requisição.</p>
+                <p className="text-red-600 dark:text-red-400 break-all">
+                  {apiError.error || 'Erro desconhecido'}{apiError.shopee_error && <span className="font-mono ml-1">({apiError.shopee_error})</span>}
+                </p>
+                {apiError.hint && <p className="text-gray-500 dark:text-gray-400">{apiError.hint}</p>}
+                {apiError.request_id && <p className="text-[10px] text-gray-400 font-mono">request_id: {apiError.request_id}</p>}
+              </div>
+            ) : suggestions.length === 0 ? (
+              <div className="p-3 text-xs text-gray-500">Nenhuma categoria encontrada para "{search}".</div>
+            ) : suggestions.map((cat) => (
+              <button key={cat.category_id} type="button" onClick={() => applyCategory(cat)}
+                className="w-full text-left px-3 py-2 text-xs hover:bg-orange-50 dark:hover:bg-orange-950/30 border-b border-gray-100 dark:border-gray-700 last:border-0">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-[11px] text-gray-500 shrink-0">{cat.category_id}</span>
+                  <span className="text-gray-800 dark:text-gray-200 truncate">{cat.path || cat.display_name || cat.name}</span>
+                </div>
+              </button>
+            ))}
+          </div>
+
+          {/* Entrada manual como fallback: abre a Shopee em nova aba e permite colar o ID */}
+          <div className="pt-2 border-t border-gray-100 dark:border-gray-700 space-y-1.5">
+            <p className="text-[11px] text-gray-500 dark:text-gray-400">
+              Prefere digitar manualmente? Abra a árvore da Shopee e cole o ID aqui.
+              {' '}
+              <a href="https://seller.shopee.com.br" target="_blank" rel="noreferrer" className="text-blue-600 dark:text-blue-400 hover:underline">Abrir Seller Center</a>
+            </p>
+            <div className="flex gap-2">
+              <input type="text" value={manualId} onChange={(e) => setManualId(e.target.value.replace(/\D/g, ''))}
+                placeholder="ID da categoria (ex.: 100053)"
+                className="flex-1 px-2 py-1.5 border dark:border-gray-600 rounded text-xs bg-white dark:bg-gray-700 text-gray-900 dark:text-white font-mono" />
+              <button type="button" disabled={!manualId}
+                onClick={() => { applyCategory({ category_id: manualId, path: '', display_name: `Categoria ${manualId}` }); setManualId(''); }}
+                className="px-3 py-1.5 text-xs font-medium rounded bg-orange-600 hover:bg-orange-700 disabled:bg-orange-300 text-white">
+                Usar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <ShopeeBrandPicker
+        accountId={accountId}
+        categoryId={channel.category_id}
+        brandId={channel.brand_id}
+        brandName={channel.brand_name}
+        onPick={(b) => onChange({ brand_id: b.brand_id, brand_name: b.name })}
+        onClear={() => onChange({ brand_id: null, brand_name: '' })}
+      />
+
+      <ShopeeAttributesBlock
+        accountId={accountId}
+        categoryId={channel.category_id}
+        value={channel.attributes || {}}
+        onChange={(attrs) => onChange({ attributes: attrs })}
+      />
+
+      <div>
+        <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Título alternativo (opcional)</label>
+        <input type="text" value={channel.title_override || ''}
+          onChange={(e) => onChange({ title_override: e.target.value })}
+          placeholder="Se preenchido, será usado só na Shopee. Senão, usa o título do modelo."
+          className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
+      </div>
+
+      <div>
+        <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Observações internas</label>
+        <textarea rows={2} value={channel.notes || ''}
+          onChange={(e) => onChange({ notes: e.target.value })}
+          placeholder="Anotações só para a sua equipe (não são enviadas à Shopee)"
+          className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
+      </div>
+    </div>
+  );
+}
+
 export const Anuncios = ({ user }) => {
   const toast = useToast();
   const [searchParams] = useSearchParams();
@@ -258,27 +1247,56 @@ export const Anuncios = ({ user }) => {
   const [pushingVar, setPushingVar] = useState({});
   const [manualStockModal, setManualStockModal] = useState(null);
   const [manualStockQty, setManualStockQty] = useState('');
+  // C2 — modal de ajuste de faixa fictícia. `mode='single'` edita um único
+  // config (recebe o item); `mode='bulk'` aplica para uma lista de items
+  // pré-selecionados (os que têm config_id).
+  const [rangeModal, setRangeModal] = useState(null);
+  const [rangeForm, setRangeForm] = useState({ min: '', max: '', saving: false });
+  // D2 — modal "detalhes da divergência" aberto pelo badge Divergente.
+  const [divergenceModal, setDivergenceModal] = useState(null);
+  // D5 — modal "histórico de estoque".
+  const [historyModal, setHistoryModal] = useState(null);
+  const [historyEntries, setHistoryEntries] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [pushingAll, setPushingAll] = useState(false);
   const [inventory, setInventory] = useState([]);
   const [filterMarketplace, setFilterMarketplace] = useState('all');
   const [filterAccount, setFilterAccount] = useState('all');
+  const [filterStatus, setFilterStatus] = useState('all'); // 'all'|'active'|'paused'|'closed'
+  const [filterLinked, setFilterLinked] = useState('all'); // 'all'|'linked'|'unlinked'
+  const [filterHasStock, setFilterHasStock] = useState('all'); // 'all'|'yes'|'no'
+  const [filterDivergence, setFilterDivergence] = useState(false);
   const [pageSize, setPageSize] = useState(20);
   const [currentPage, setCurrentPage] = useState(1);
+  // Totais e paginação devolvidos pelo /api/ad-items (server-side).
+  const [itemsTotal, setItemsTotal] = useState(0);
+  const [itemsTotalPages, setItemsTotalPages] = useState(1);
+  const [itemsTotals, setItemsTotals] = useState({ ml: 0, shopee: 0 });
   const debouncedSearch = useDebounce(search, 400);
 
-  const [selectedItems, setSelectedItems] = useState(new Set());
+  // selectedItems: Map<key, item> — o valor armazena uma referência ao item da
+  // página atual quando ele é marcado, suficiente para executar ações em massa
+  // sem precisar reabrir cada página para recolher o objeto.
+  const [selectedItems, setSelectedItems] = useState(new Map());
   const [importing, setImporting] = useState(false);
+  const [bulkRunning, setBulkRunning] = useState(null); // 'pause'|'activate'|'link'|'push'|'refresh'
+  // UX — menu consolidado de sincronização e filtros colapsáveis, para manter
+  // o topo da tela mais discreto (pedido do usuário).
+  const [syncMenuOpen, setSyncMenuOpen] = useState(false);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const syncMenuRef = useRef(null);
+  useEffect(() => {
+    if (!syncMenuOpen) return;
+    const handler = (e) => {
+      if (syncMenuRef.current && !syncMenuRef.current.contains(e.target)) setSyncMenuOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [syncMenuOpen]);
 
-  const [templates, setTemplates] = useState([]);
-  const [templatesLoading, setTemplatesLoading] = useState(false);
-  const [templateSearch, setTemplateSearch] = useState('');
-  const [templateFilter, setTemplateFilter] = useState('');
-  const debouncedTemplateSearch = useDebounce(templateSearch, 400);
-  const [selectedTemplates, setSelectedTemplates] = useState(new Set());
-  const [editModal, setEditModal] = useState(null);
-  const [publishModal, setPublishModal] = useState(null);
-  const [publishing, setPublishing] = useState(false);
+  // Estado legado dos templates ML foi removido: a aba "Modelos" agora usa exclusivamente
+  // ad_models (source única de verdade).
 
   const [adModels, setAdModels] = useState([]);
   const [adModelsLoading, setAdModelsLoading] = useState(false);
@@ -292,11 +1310,21 @@ export const Anuncios = ({ user }) => {
   const [presetEditDraft, setPresetEditDraft] = useState(null);
   const [presetSaving, setPresetSaving] = useState(false);
   const [modelPublishModal, setModelPublishModal] = useState(null);
+  const [multiPublishModal, setMultiPublishModal] = useState(null);
+  const [multiPublishRunning, setMultiPublishRunning] = useState(false);
+  const [multiPublishResults, setMultiPublishResults] = useState(null);
   const [modelPublishing, setModelPublishing] = useState(false);
   const [bulkPublishModal, setBulkPublishModal] = useState(null);
   const [bulkPublishing, setBulkPublishing] = useState(false);
   const [bulkProgress, setBulkProgress] = useState(null);
   const [modelImportModal, setModelImportModal] = useState(null);
+  const [importByIdModal, setImportByIdModal] = useState(null);
+  const [importByIdLoading, setImportByIdLoading] = useState(false);
+  const [mediaLibraryModal, setMediaLibraryModal] = useState(null);
+  const [mediaLibraryItems, setMediaLibraryItems] = useState([]);
+  const [mediaLibraryLoading, setMediaLibraryLoading] = useState(false);
+  const [mediaLibrarySearch, setMediaLibrarySearch] = useState('');
+  const [mediaLibrarySelected, setMediaLibrarySelected] = useState(new Set());
   const [openActionMenu, setOpenActionMenu] = useState(null);
   const [expandedModels, setExpandedModels] = useState(new Set());
   const [pushingModel, setPushingModel] = useState({});
@@ -310,9 +1338,19 @@ export const Anuncios = ({ user }) => {
   const [modelShowPicUrlInput, setModelShowPicUrlInput] = useState(false);
   const [modelPicEditIndex, setModelPicEditIndex] = useState(null);
   const [modelVariationAxisChoice, setModelVariationAxisChoice] = useState(null);
+  /** Após "Alterar", mostra o seletor Cor/Voltagem/… sem voltar a aplicar «Sem variação» por defeito. */
+  const [variationPickerRequested, setVariationPickerRequested] = useState(false);
   /** Índices de variação expandidos no modal (acordeão). */
   const [modelVariationExpanded, setModelVariationExpanded] = useState(() => new Set([0]));
   const [modelEditViewTab, setModelEditViewTab] = useState('detalhes');
+  const [modelValidationResult, setModelValidationResult] = useState(null);
+  const [modelValidationLoading, setModelValidationLoading] = useState(false);
+  /** No editor de modelo: ocultar códigos ML (BRAND, etc.) por defeito — mais limpo para o utilizador. */
+  const [modelShowTechnicalIds, setModelShowTechnicalIds] = useState(false);
+  /** Reordenar imagens no modal: drag-and-drop (índice de origem durante arrasto) */
+  const modelPictureDragFromRef = useRef(null);
+  const [modelPictureDragOverIndex, setModelPictureDragOverIndex] = useState(null);
+  const [modelPictureDraggingIndex, setModelPictureDraggingIndex] = useState(null);
   const modelPictureFileInputRef = useRef(null);
 
   const loadPackagePresets = useCallback(async () => {
@@ -327,7 +1365,12 @@ export const Anuncios = ({ user }) => {
   useEffect(() => {
     (async () => { try { const r = await axios.get('/api/ml/accounts'); setMlAccounts(r.data?.accounts || []); } catch { setMlAccounts([]); } })();
     (async () => { try { const r = await axios.get('/api/shopee/accounts'); setShopeeAccounts(r.data?.accounts || []); } catch { setShopeeAccounts([]); } })();
-    (async () => { try { const r = await axios.get('/api/inventory', { params: { limit: 99999, offset: 0 } }); setInventory(r.data.items || []); } catch { setInventory([]); } })();
+    (async () => {
+      try {
+        const r = await axios.get('/api/inventory', { params: { limit: 300, offset: 0 } });
+        setInventory(r.data.items || []);
+      } catch { setInventory([]); }
+    })();
   }, []);
 
   useEffect(() => {
@@ -336,6 +1379,26 @@ export const Anuncios = ({ user }) => {
     document.addEventListener('click', close);
     return () => document.removeEventListener('click', close);
   }, [openActionMenu]);
+
+  // Busca sob demanda no inventário quando os modais de vínculo (linkModal/varLinkModal)
+  // estão abertos. Mantém o cache anterior (evita piscar a lista) e faz o merge por id.
+  useEffect(() => {
+    if (!linkModal && !varLinkModal) return;
+    const tid = setTimeout(async () => {
+      try {
+        const q = (linkSearch || '').trim();
+        const r = await axios.get('/api/inventory', { params: { search: q, limit: 200 } });
+        const items = Array.isArray(r.data?.items) ? r.data.items : [];
+        setInventory((prev) => {
+          const map = new Map();
+          for (const it of items) map.set(it.id, it);
+          for (const it of prev) if (!map.has(it.id)) map.set(it.id, it);
+          return Array.from(map.values());
+        });
+      } catch {}
+    }, 220);
+    return () => clearTimeout(tid);
+  }, [linkSearch, linkModal, varLinkModal]);
 
   useEffect(() => {
     if (!modelEditModal?.category_id) {
@@ -390,7 +1453,11 @@ export const Anuncios = ({ user }) => {
   }, [modelEditModal?.id, modelEditModal?.category_id, loadPackagePresets]);
 
   useEffect(() => {
-    if (modelEditModal) setModelEditViewTab('detalhes');
+    if (modelEditModal) {
+      setModelEditViewTab('detalhes');
+      setModelShowTechnicalIds(false);
+      setVariationPickerRequested(false);
+    }
   }, [modelEditModal?.id]);
 
   useEffect(() => {
@@ -406,7 +1473,12 @@ export const Anuncios = ({ user }) => {
       setModelShowPicUrlInput(false);
       setModelPicEditIndex(null);
       setModelVariationAxisChoice(null);
+      setVariationPickerRequested(false);
       setModelVariationExpanded(new Set([0]));
+      setModelShowTechnicalIds(false);
+      modelPictureDragFromRef.current = null;
+      setModelPictureDragOverIndex(null);
+      setModelPictureDraggingIndex(null);
       return;
     }
     const vars = modelEditModal._variations || [];
@@ -429,6 +1501,26 @@ export const Anuncios = ({ user }) => {
     const arr = Array.isArray(modelCategorySchema) ? modelCategorySchema : [];
     return arr.filter((a) => a.tags?.allow_variations);
   }, [modelCategorySchema]);
+
+  /** Modelo sem linhas de variação + categoria com eixos ML: «Sem variação» fica explícito (evita o seletor vazio). */
+  useEffect(() => {
+    if (!modelEditModal) return;
+    if ((modelEditModal._variations || []).length > 0) return;
+    if (modelVariationAxisAttrs.length === 0) return;
+    if (modelVariationAxisChoice !== null) return;
+    if (variationPickerRequested) return;
+    setModelVariationAxisChoice('none');
+  }, [
+    modelEditModal?.id,
+    modelEditModal?._variations?.length,
+    modelVariationAxisAttrs.length,
+    modelVariationAxisChoice,
+    variationPickerRequested,
+  ]);
+
+  useEffect(() => {
+    if (modelVariationAxisChoice != null) setVariationPickerRequested(false);
+  }, [modelVariationAxisChoice]);
 
   const modelVariationAxisAttrsFiltered = useMemo(() => {
     return filterVariationAttrsByKind(modelVariationAxisAttrs, modelVariationAxisChoice);
@@ -526,29 +1618,62 @@ export const Anuncios = ({ user }) => {
   const fetchItems = useCallback(async () => {
     setLoading(true);
     try {
-      const [mlRes, shopeeRes] = await Promise.all([
-        axios.get('/api/ml/items', { params: { search } }).catch(() => ({ data: [] })),
-        axios.get('/api/shopee/items', { params: { search } }).catch(() => ({ data: [] }))
-      ]);
-      const mlItems = (mlRes.data || []).map(i => ({ ...i, source: 'ml', item_id_display: i.ml_item_id, stock_qty: i.ml_available_quantity, uid: `ml-${i.id}` }));
-      const shopeeItems = (shopeeRes.data || []).map(i => ({ ...i, source: 'shopee', item_id_display: i.shopee_item_id, stock_qty: i.shopee_stock, uid: `shopee-${i.id}` }));
-      setItems([...mlItems, ...shopeeItems]);
-    } catch { setItems([]); }
+      const params = {
+        page: currentPage,
+        pageSize,
+        marketplace: filterMarketplace,
+        search: search || undefined,
+      };
+      if (filterAccount !== 'all') params.accountId = filterAccount;
+      if (filterStatus !== 'all') params.status = filterStatus;
+      if (filterLinked !== 'all') params.linked = filterLinked;
+      if (filterHasStock !== 'all') params.hasStock = filterHasStock;
+      if (filterDivergence) params.divergence = 'yes';
+      const r = await axios.get('/api/ad-items', { params });
+      // Normaliza variações de ambos os marketplaces para um shape comum que o
+      // JSX da expansão possa consumir sem if/else no meio do markup.
+      const normalized = (r.data?.items || []).map((it) => {
+        if (!Array.isArray(it.variations) || it.variations.length === 0) return it;
+        const variations = it.variations.map((v) => {
+          if (it.source === 'ml') {
+            let combos = [];
+            try { combos = JSON.parse(v.attribute_combinations || '[]'); } catch { /* noop */ }
+            const combo_str = combos.map((c) => `${c.name || c.id}: ${c.value_name || c.value_id || '?'}`).join(' | ');
+            return {
+              ...v,
+              __src: 'ml',
+              __sku: v.sku,
+              __ref_id: v.variation_id,
+              __combo_str: combo_str,
+              __combos: combos,
+              __available: v.available_quantity,
+              __thumbnail: v.thumbnail,
+            };
+          }
+          return {
+            ...v,
+            __src: 'shopee',
+            __sku: v.model_sku || v.sku || '',
+            __ref_id: v.model_id,
+            __combo_str: v.name || '',
+            __combos: [],
+            __available: v.stock,
+            __thumbnail: v.thumbnail,
+          };
+        });
+        return { ...it, variations };
+      });
+      setItems(normalized);
+      setItemsTotal(r.data?.total || 0);
+      setItemsTotalPages(r.data?.totalPages || 1);
+      setItemsTotals(r.data?.totals || { ml: 0, shopee: 0 });
+    } catch {
+      setItems([]); setItemsTotal(0); setItemsTotalPages(1); setItemsTotals({ ml: 0, shopee: 0 });
+    }
     setLoading(false);
-  }, [search]);
+  }, [search, currentPage, pageSize, filterMarketplace, filterAccount, filterStatus, filterLinked, filterHasStock, filterDivergence]);
 
-  useEffect(() => { fetchItems(); }, [debouncedSearch]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const fetchTemplates = useCallback(async () => {
-    setTemplatesLoading(true);
-    try {
-      const r = await axios.get('/api/ml/templates', { params: { search: templateSearch, status: templateFilter || undefined } });
-      setTemplates(r.data?.templates || []);
-    } catch { setTemplates([]); }
-    setTemplatesLoading(false);
-  }, [templateSearch, templateFilter]);
-
-  useEffect(() => { if (activeTab === 'modelos') fetchTemplates(); }, [activeTab, debouncedTemplateSearch, templateFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { fetchItems(); }, [debouncedSearch, currentPage, pageSize, filterMarketplace, filterAccount, filterStatus, filterLinked, filterHasStock, filterDivergence]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fetchAdModels = useCallback(async () => {
     setAdModelsLoading(true);
@@ -571,6 +1696,21 @@ export const Anuncios = ({ user }) => {
       fetchItems();
     } catch (e) { toast.error(e.response?.data?.error || 'Erro ao sincronizar'); }
     setSyncing(false);
+  };
+
+  const [syncingFast, setSyncingFast] = useState(false);
+  const handleSyncFast = async () => {
+    setSyncingFast(true);
+    try {
+      const r = await axios.post('/api/ad-items/sync-fast', {});
+      const results = r.data?.results || [];
+      const added = results.reduce((s, x) => s + (x.added || 0), 0);
+      const refreshed = results.reduce((s, x) => s + (x.refreshed || 0) + (x.synced || 0), 0);
+      const errors = results.reduce((s, x) => s + (x.errors || 0) + (x.error ? 1 : 0), 0);
+      toast.success(`Sync rápido concluído — novos: ${added} · atualizados: ${refreshed}${errors ? ` · erros: ${errors}` : ''}`);
+      fetchItems();
+    } catch (e) { toast.error(e.response?.data?.error || 'Erro no sync rápido'); }
+    setSyncingFast(false);
   };
 
   const handleLink = async (item, inventoryId) => {
@@ -601,26 +1741,106 @@ export const Anuncios = ({ user }) => {
     catch { toast.error('Erro ao atualizar'); }
   };
 
+  // C2 — abre o modal de ajuste de faixa. Para uma única linha passa o item;
+  // para massa passa uma lista já filtrada (somente com config_id).
+  const openRangeModal = (payload) => {
+    const isBulk = payload?.mode === 'bulk';
+    const ref = isBulk ? (payload.items?.[0] || null) : payload;
+    const seedMin = ref?.fictitious_min ?? 450;
+    const seedMax = ref?.fictitious_max ?? 499;
+    setRangeModal(payload);
+    setRangeForm({ min: String(seedMin), max: String(seedMax), saving: false });
+  };
+
+  // D5 — abre timeline. Busca combinando movimentações e stock_audit_log.
+  const openHistoryModal = async (item) => {
+    const invId = item.inventory_id;
+    if (!invId) {
+      toast.error('Item sem vínculo com o inventário.');
+      return;
+    }
+    setHistoryModal(item);
+    setHistoryEntries([]);
+    setHistoryLoading(true);
+    try {
+      const res = await axios.get(`/api/inventory/${invId}/stock-history`, { params: { limit: 50 } });
+      setHistoryEntries(Array.isArray(res.data) ? res.data : []);
+    } catch {
+      toast.error('Erro ao carregar histórico');
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  const handleSaveRange = async () => {
+    const minN = parseInt(rangeForm.min, 10);
+    const maxN = parseInt(rangeForm.max, 10);
+    if (!Number.isFinite(minN) || !Number.isFinite(maxN)) return toast.error('Informe números válidos');
+    if (minN < 0 || maxN < 0) return toast.error('Valores não podem ser negativos');
+    if (minN > maxN) return toast.error('Mínimo não pode ser maior que o máximo');
+    setRangeForm(f => ({ ...f, saving: true }));
+    try {
+      if (rangeModal?.mode === 'bulk') {
+        const items = rangeModal.items || [];
+        const mlIds = items.filter(i => i.source === 'ml' && i.config_id).map(i => i.config_id);
+        const shopeeIds = items.filter(i => i.source === 'shopee' && i.config_id).map(i => i.config_id);
+        if (mlIds.length === 0 && shopeeIds.length === 0) {
+          toast.error('Nenhum item selecionado com vínculo de configuração');
+          setRangeForm(f => ({ ...f, saving: false }));
+          return;
+        }
+        const tasks = [];
+        if (mlIds.length) tasks.push(axios.post('/api/ml/stock-config/bulk-range', { config_ids: mlIds, fictitious_min: minN, fictitious_max: maxN }));
+        if (shopeeIds.length) tasks.push(axios.post('/api/shopee/stock-config/bulk-range', { config_ids: shopeeIds, fictitious_min: minN, fictitious_max: maxN }));
+        const results = await Promise.all(tasks);
+        const total = results.reduce((a, r) => a + (r.data?.updated || 0), 0);
+        toast.success(`Faixa aplicada em ${total} configurações.`);
+      } else {
+        const item = rangeModal;
+        const endpoint = item.source === 'ml' ? `/api/ml/stock-config/${item.config_id}` : `/api/shopee/stock/${item.config_id}`;
+        await axios.put(endpoint, { use_real_stock: item.use_real_stock, fictitious_min: minN, fictitious_max: maxN, enabled: item.enabled });
+        toast.success('Faixa atualizada.');
+      }
+      setRangeModal(null);
+      fetchItems();
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Erro ao salvar faixa');
+    } finally {
+      setRangeForm(f => ({ ...f, saving: false }));
+    }
+  };
+
   const handleVarLink = async (variation, inventoryId) => {
     try {
-      await axios.post('/api/ml/variation-stock/link', {
-        inventory_id: inventoryId, ml_account_id: variation.ml_account_id,
-        ml_item_id: variation.ml_item_id, variation_id: variation.variation_id
-      });
+      if (variation.__src === 'shopee') {
+        await axios.post('/api/shopee/variation-stock/link', {
+          inventory_id: inventoryId,
+          shopee_account_id: variation.shopee_account_id,
+          shopee_item_id: variation.shopee_item_id,
+          model_id: variation.model_id,
+        });
+      } else {
+        await axios.post('/api/ml/variation-stock/link', {
+          inventory_id: inventoryId, ml_account_id: variation.ml_account_id,
+          ml_item_id: variation.ml_item_id, variation_id: variation.variation_id
+        });
+      }
       toast.success('Variação vinculada!'); setVarLinkModal(null); setLinkSearch(''); fetchItems();
     } catch (e) { toast.error(e.response?.data?.error || 'Erro ao vincular variação'); }
   };
 
   const handleVarUnlink = async (variation) => {
     try {
-      await axios.delete(`/api/ml/variation-stock/${variation.var_config_id}`);
+      const base = variation.__src === 'shopee' ? '/api/shopee/variation-stock' : '/api/ml/variation-stock';
+      await axios.delete(`${base}/${variation.var_config_id}`);
       toast.success('Desvinculado'); fetchItems();
     } catch { toast.error('Erro ao desvincular variação'); }
   };
 
   const handleVarToggleRealStock = async (v) => {
     try {
-      await axios.put(`/api/ml/variation-stock/${v.var_config_id}`, {
+      const base = v.__src === 'shopee' ? '/api/shopee/variation-stock' : '/api/ml/variation-stock';
+      await axios.put(`${base}/${v.var_config_id}`, {
         use_real_stock: v.var_use_real_stock ? 0 : 1,
         fictitious_min: v.var_fict_min, fictitious_max: v.var_fict_max, enabled: v.var_enabled
       });
@@ -630,12 +1850,58 @@ export const Anuncios = ({ user }) => {
 
   const handleVarToggleEnabled = async (v) => {
     try {
-      await axios.put(`/api/ml/variation-stock/${v.var_config_id}`, {
+      const base = v.__src === 'shopee' ? '/api/shopee/variation-stock' : '/api/ml/variation-stock';
+      await axios.put(`${base}/${v.var_config_id}`, {
         use_real_stock: v.var_use_real_stock,
         fictitious_min: v.var_fict_min, fictitious_max: v.var_fict_max, enabled: v.var_enabled ? 0 : 1
       });
       fetchItems();
     } catch { toast.error('Erro ao atualizar'); }
+  };
+
+  // ─── Edição inline de preço e refresh por item (A5) ──────────────────
+  const [priceEditModal, setPriceEditModal] = useState(null); // { item, value }
+  const [savingPrice, setSavingPrice] = useState(false);
+  const [refreshingItem, setRefreshingItem] = useState({});
+
+  const openPriceEdit = (item) => setPriceEditModal({ item, value: String(item.price ?? '') });
+
+  const savePriceEdit = async () => {
+    if (!priceEditModal) return;
+    const { item } = priceEditModal;
+    const price = Number(priceEditModal.value);
+    if (!Number.isFinite(price) || price <= 0) return toast.error('Preço inválido');
+    setSavingPrice(true);
+    try {
+      if (item.source === 'ml') {
+        await axios.put(`/api/ml/items/${item.ml_item_id}/price`, { price, accountId: item.ml_account_id });
+      } else {
+        await axios.put(`/api/shopee/items/${item.shopee_item_id}/price`, { price, accountId: item.shopee_account_id });
+      }
+      toast.success('Preço atualizado!');
+      setPriceEditModal(null);
+      fetchItems();
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Erro ao alterar preço');
+    }
+    setSavingPrice(false);
+  };
+
+  const handleRefreshItem = async (item) => {
+    const key = `${item.source}-${item.uid}`;
+    setRefreshingItem((s) => ({ ...s, [key]: true }));
+    try {
+      if (item.source === 'ml') {
+        await axios.post(`/api/ml/items/${item.ml_item_id}/refresh`, { accountId: item.ml_account_id });
+      } else {
+        await axios.post(`/api/shopee/items/${item.shopee_item_id}/refresh`, { accountId: item.shopee_account_id });
+      }
+      toast.success('Atualizado do marketplace');
+      fetchItems();
+    } catch (e) {
+      toast.error(e.response?.data?.error || 'Erro ao atualizar do marketplace');
+    }
+    setRefreshingItem((s) => ({ ...s, [key]: false }));
   };
 
   const handleManualStock = async () => {
@@ -655,7 +1921,8 @@ export const Anuncios = ({ user }) => {
     const key = `var-${variation.var_config_id}`;
     setPushingVar(p => ({ ...p, [key]: true }));
     try {
-      const res = await axios.post('/api/ml/variation-stock/push', { configId: variation.var_config_id });
+      const endpoint = variation.__src === 'shopee' ? '/api/shopee/variation-stock/push' : '/api/ml/variation-stock/push';
+      const res = await axios.post(endpoint, { configId: variation.var_config_id });
       toast.success(`Estoque variação enviado: ${res.data.pushed_quantity} un.`); fetchItems();
     } catch (e) { toast.error(e.response?.data?.error || 'Erro ao enviar estoque variação'); }
     setPushingVar(p => ({ ...p, [key]: false }));
@@ -691,119 +1958,187 @@ export const Anuncios = ({ user }) => {
     } catch (e) { toast.error(e.response?.data?.error || 'Erro ao alterar status'); }
   };
 
+  const itemKey = (item) => `${item.source}:${item.item_id_display}:${item.source === 'ml' ? item.ml_account_id : item.shopee_account_id}`;
+
   const toggleSelectItem = (item) => {
     setSelectedItems(prev => {
-      const next = new Set(prev);
-      const key = `${item.source}:${item.item_id_display}:${item.source === 'ml' ? item.ml_account_id : item.shopee_account_id}`;
-      next.has(key) ? next.delete(key) : next.add(key);
+      const next = new Map(prev);
+      const key = itemKey(item);
+      if (next.has(key)) next.delete(key); else next.set(key, item);
       return next;
     });
   };
 
   const toggleSelectAll = () => {
-    const mlItems = items.filter(i => i.source === 'ml');
-    if (selectedItems.size === mlItems.length) { setSelectedItems(new Set()); }
-    else { setSelectedItems(new Set(mlItems.map(i => `ml:${i.ml_item_id}:${i.ml_account_id}`))); }
+    const importable = items.filter((i) => i.source === 'ml' || i.source === 'shopee');
+    // Se TODOS os itens da página atual já estão selecionados, deseleciona-os
+    // (mantendo seleção de outras páginas). Caso contrário, adiciona os da
+    // página atual ao Map de seleção.
+    setSelectedItems(prev => {
+      const next = new Map(prev);
+      const allSelected = importable.every((i) => next.has(itemKey(i)));
+      if (allSelected) {
+        importable.forEach((i) => next.delete(itemKey(i)));
+      } else {
+        importable.forEach((i) => next.set(itemKey(i), i));
+      }
+      return next;
+    });
+  };
+
+  const clearSelection = () => setSelectedItems(new Map());
+
+  const buildImportPayload = (source, itemId, accountId) => {
+    const acc = parseInt(accountId, 10);
+    if (source === 'shopee') {
+      return { marketplace: 'shopee', shopeeItemId: String(itemId), shopeeAccountId: acc, forceOverwrite: true };
+    }
+    return { marketplace: 'ml', mlItemId: itemId, accountId: acc, forceOverwrite: true };
   };
 
   const handleImportSelected = async () => {
     if (selectedItems.size === 0) return;
     setImporting(true);
-    const grouped = {};
-    for (const key of selectedItems) {
-      const [source, itemId, accountId] = key.split(':');
-      if (source !== 'ml') continue;
-      if (!grouped[accountId]) grouped[accountId] = [];
-      grouped[accountId].push(itemId);
-    }
     let totalImported = 0, totalErrors = 0;
-    for (const [accountId, mlItemIds] of Object.entries(grouped)) {
+    for (const key of selectedItems.keys()) {
+      const [source, itemId, accountId] = key.split(':');
+      if (source !== 'ml' && source !== 'shopee') continue;
       try {
-        const r = await axios.post('/api/ml/templates/import-bulk', { mlItemIds, accountId: parseInt(accountId, 10) });
-        totalImported += r.imported || 0;
-        totalErrors += (r.errors || []).length;
+        await axios.post('/api/ad-models/import', buildImportPayload(source, itemId, accountId));
+        totalImported++;
       } catch { totalErrors++; }
     }
-    toast.success(`Importados: ${totalImported} | Erros: ${totalErrors}`);
-    setSelectedItems(new Set());
+    toast.success(`Modelos importados: ${totalImported} | Erros: ${totalErrors}`);
+    setSelectedItems(new Map());
     setImporting(false);
-    if (totalImported > 0) { fetchTemplates(); }
+    if (totalImported > 0) { fetchAdModels(); }
+  };
+
+  // ─── Ações em massa (A4) ────────────────────────────────────────────────
+  // Executa worker(item) com no máximo `concurrency` requisições em paralelo,
+  // protegendo as APIs de rate-limit e mantendo o painel responsivo.
+  const runBulk = async (concurrency, list, worker) => {
+    const out = { ok: 0, fail: 0, errors: [] };
+    let idx = 0;
+    const next = async () => {
+      while (idx < list.length) {
+        const i = idx++;
+        try { await worker(list[i]); out.ok++; }
+        catch (e) { out.fail++; out.errors.push({ item: list[i], message: e.response?.data?.error || e.message }); }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, list.length)) }, next));
+    return out;
+  };
+
+  const handleBulkChangeStatus = async (newStatus) => {
+    const targets = Array.from(selectedItems.values()).filter((it) =>
+      newStatus === 'paused' ? isActive(it) : canActivate(it)
+    );
+    if (targets.length === 0) return toast.error('Nenhum item elegível para esta ação na seleção.');
+    const verb = newStatus === 'paused' ? 'pause' : 'activate';
+    setBulkRunning(verb);
+    const result = await runBulk(3, targets, async (item) => {
+      if (item.source === 'ml') {
+        await axios.put(`/api/ml/items/${item.ml_item_id}/status`, { status: newStatus, accountId: item.ml_account_id });
+      } else {
+        const action = newStatus === 'paused' ? 'unlist' : 'relist';
+        await axios.post(`/api/shopee/items/${item.shopee_item_id}/status`, { action, accountId: item.shopee_account_id });
+      }
+    });
+    setBulkRunning(null);
+    toast.success(`${newStatus === 'paused' ? 'Pausados' : 'Ativados'}: ${result.ok} | Erros: ${result.fail}`);
+    fetchItems();
+  };
+
+  // Faz vínculo automático com inventário usando o SKU exato. Trabalha em duas
+  // etapas: garante o cache de inventário (busca os SKUs em falta) e depois
+  // dispara os links em paralelo.
+  const handleBulkLinkBySku = async () => {
+    const targets = Array.from(selectedItems.values()).filter((it) => !it.config_id && (it.variation_count || 0) === 0 && it.sku);
+    if (targets.length === 0) return toast.error('Nenhum item elegível: precisam estar sem vínculo, sem variações e ter SKU.');
+    setBulkRunning('link');
+    // Pré-carrega inventário pelos SKUs ainda não conhecidos.
+    const knownSkus = new Set(inventory.map((i) => String(i.sku)));
+    const unknown = Array.from(new Set(targets.map((t) => String(t.sku)).filter((s) => !knownSkus.has(s))));
+    if (unknown.length > 0) {
+      try {
+        // Server-side search é uma LIKE, então buscamos lote a lote.
+        const results = await Promise.all(unknown.map((sku) =>
+          axios.get('/api/inventory', { params: { search: sku, limit: 5 } }).then((r) => r.data?.items || []).catch(() => [])));
+        const seen = new Set(inventory.map((i) => i.id));
+        const merge = [];
+        for (const arr of results) for (const inv of arr) if (!seen.has(inv.id)) { seen.add(inv.id); merge.push(inv); }
+        if (merge.length > 0) setInventory((prev) => [...prev, ...merge]);
+      } catch { /* segue com inventory parcial */ }
+    }
+    // Refaz lookup local depois do carregamento.
+    const lookup = new Map();
+    for (const inv of inventory) lookup.set(String(inv.sku), inv);
+    // Reaplica caso o setInventory acima tenha trazido mais itens — pode não ter
+    // sido refletido ainda no estado, então tentamos refetch via axios direto.
+    const result = await runBulk(4, targets, async (item) => {
+      let inv = lookup.get(String(item.sku));
+      if (!inv) {
+        const r = await axios.get('/api/inventory', { params: { search: item.sku, limit: 5 } });
+        inv = (r.data?.items || []).find((x) => String(x.sku) === String(item.sku));
+        if (!inv) throw new Error('SKU não encontrado no inventário');
+      }
+      if (item.source === 'ml') {
+        await axios.post('/api/ml/stock-config/link', { inventory_id: inv.id, ml_account_id: item.ml_account_id, ml_item_id: item.ml_item_id });
+      } else {
+        await axios.post('/api/shopee/stock/link', { inventoryId: inv.id, shopeeItemId: item.shopee_item_id, shopeeAccountId: item.shopee_account_id });
+      }
+    });
+    setBulkRunning(null);
+    toast.success(`Vinculados: ${result.ok} | Erros: ${result.fail}`);
+    fetchItems();
+  };
+
+  const handleBulkPush = async () => {
+    const targets = Array.from(selectedItems.values()).filter((it) => it.config_id && (it.variation_count || 0) === 0);
+    if (targets.length === 0) return toast.error('Nenhum item vinculado (sem variações) na seleção.');
+    setBulkRunning('push');
+    const result = await runBulk(3, targets, async (item) => {
+      const endpoint = item.source === 'ml' ? '/api/ml/stock/push' : '/api/shopee/stock/push';
+      await axios.post(endpoint, { configId: item.config_id });
+    });
+    setBulkRunning(null);
+    toast.success(`Estoque enviado: ${result.ok} | Erros: ${result.fail}`);
+    fetchItems();
+  };
+
+  const handleBulkRefresh = async () => {
+    // Refresh é uma feature do ML (POST /api/ml/items/:id/refresh). Para Shopee
+    // a forma é re-sincronizar a conta inteira; aqui mantemos só ML.
+    const targets = Array.from(selectedItems.values()).filter((it) => it.source === 'ml');
+    if (targets.length === 0) return toast.error('Refresh disponível apenas para itens do Mercado Livre.');
+    setBulkRunning('refresh');
+    const result = await runBulk(2, targets, async (item) => {
+      await axios.post(`/api/ml/items/${item.ml_item_id}/refresh`, { accountId: item.ml_account_id });
+    });
+    setBulkRunning(null);
+    toast.success(`Atualizados: ${result.ok} | Erros: ${result.fail}`);
+    fetchItems();
   };
 
   const handleImportSingle = async (item) => {
-    if (item.source !== 'ml') return toast.error('Importação disponível apenas para Mercado Livre');
     try {
-      const r = await axios.post('/api/ml/templates/import', { mlItemId: item.ml_item_id, accountId: item.ml_account_id });
-      toast.success(`"${r.data.title}" importado como template!`);
-      fetchTemplates();
+      const payload = item.source === 'shopee'
+        ? { marketplace: 'shopee', shopeeItemId: String(item.shopee_item_id), shopeeAccountId: item.shopee_account_id, forceOverwrite: true }
+        : { marketplace: 'ml', mlItemId: item.ml_item_id, accountId: item.ml_account_id, forceOverwrite: true };
+      const r = await axios.post('/api/ad-models/import', payload);
+      toast.success(`Modelo "${r.data.title}" ${r.data.updated ? 'atualizado' : 'criado'}!`);
+      fetchAdModels();
     } catch (e) { toast.error(e.response?.data?.error || 'Erro ao importar'); }
   };
 
-  const handleDeleteTemplate = async (id) => {
-    if (!window.confirm('Excluir este template?')) return;
-    try { await axios.delete(`/api/ml/templates/${id}`); toast.success('Template excluído'); fetchTemplates(); }
-    catch { toast.error('Erro ao excluir'); }
-  };
-
-  const handleDeleteSelectedTemplates = async () => {
-    if (selectedTemplates.size === 0) return;
-    if (!window.confirm(`Excluir ${selectedTemplates.size} template(s)?`)) return;
-    try { await axios.delete('/api/ml/templates', { data: { ids: [...selectedTemplates] } }); toast.success('Templates excluídos'); setSelectedTemplates(new Set()); fetchTemplates(); }
-    catch { toast.error('Erro ao excluir'); }
-  };
-
-  const handleSaveEdit = async () => {
-    if (!editModal) return;
-    try {
-      const payload = {
-        title: editModal.title,
-        price: parseFloat(editModal.price) || 0,
-        available_quantity: parseInt(editModal.available_quantity, 10) || 1,
-        listing_type_id: editModal.listing_type_id,
-        description: editModal.description,
-        condition: editModal.condition,
-        buying_mode: editModal.buying_mode,
-        currency_id: editModal.currency_id,
-        category_id: editModal.category_id,
-        video_id: editModal.video_id || null,
-      };
-      if (editModal._attributes) payload.attributes = editModal._attributes;
-      if (editModal._variations) payload.variations = editModal._variations;
-      if (editModal._shipping) payload.shipping = editModal._shipping;
-      if (editModal._sale_terms) payload.sale_terms = editModal._sale_terms;
-      await axios.put(`/api/ml/templates/${editModal.id}`, payload);
-      toast.success('Template atualizado!');
-      setEditModal(null);
-      fetchTemplates();
-    } catch (e) { toast.error(e.response?.data?.error || 'Erro ao salvar'); }
-  };
-
-  const handlePublish = async () => {
-    if (!publishModal) return;
-    setPublishing(true);
-    try {
-      if (publishModal.templateIds) {
-        const r = await axios.post('/api/ml/templates/publish-bulk', { templateIds: publishModal.templateIds, targetAccountId: publishModal.targetAccountId });
-        toast.success(`Publicados: ${r.data.published} | Erros: ${r.data.errors?.length || 0}`);
-        if (r.data.errors?.length) console.warn('Publish errors:', r.data.errors);
-      } else {
-        const r = await axios.post(`/api/ml/templates/${publishModal.templateId}/publish`, { targetAccountId: publishModal.targetAccountId });
-        toast.success(`Publicado! Novo ID: ${r.data.newItemId}`);
-      }
-      setPublishModal(null);
-      setSelectedTemplates(new Set());
-      fetchTemplates();
-    } catch (e) { toast.error(e.response?.data?.error || 'Erro ao publicar'); }
-    setPublishing(false);
-  };
-
-  const openPublishModal = (templateId) => setPublishModal({ templateId, targetAccountId: '' });
-  const openBulkPublishModal = () => setPublishModal({ templateIds: [...selectedTemplates], targetAccountId: '' });
-
   const handleModelImportFromItem = async (item, forceOverwrite = false) => {
-    if (item.source !== 'ml') return toast.error('Importação disponível apenas para Mercado Livre');
     try {
-      const r = await axios.post('/api/ad-models/import', { mlItemId: item.ml_item_id, accountId: item.ml_account_id, forceOverwrite });
+      const payload = item.source === 'shopee'
+        ? { marketplace: 'shopee', shopeeItemId: String(item.shopee_item_id), shopeeAccountId: item.shopee_account_id, forceOverwrite }
+        : { marketplace: 'ml', mlItemId: item.ml_item_id, accountId: item.ml_account_id, forceOverwrite };
+      const r = await axios.post('/api/ad-models/import', payload);
       toast.success(`Modelo "${r.data.title}" ${forceOverwrite ? 'atualizado' : 'criado'}!`);
       fetchAdModels();
     } catch (e) {
@@ -842,6 +2177,52 @@ export const Anuncios = ({ user }) => {
       setModelPicUploading(false);
       e.target.value = '';
     }
+  };
+
+  const reorderModelPictures = (fromIndex, toIndex) => {
+    if (fromIndex == null || toIndex == null || fromIndex === toIndex) return;
+    setModelEditModal((prev) => {
+      const pics = [...(prev._pictures || [])];
+      if (fromIndex < 0 || fromIndex >= pics.length || toIndex < 0 || toIndex >= pics.length) return prev;
+      const [moved] = pics.splice(fromIndex, 1);
+      pics.splice(toIndex, 0, moved);
+      return { ...prev, _pictures: pics };
+    });
+  };
+
+  const handleModelPictureDragStart = (e, pi) => {
+    modelPictureDragFromRef.current = pi;
+    setModelPictureDraggingIndex(pi);
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', String(pi));
+  };
+
+  const handleModelPictureDragEnd = () => {
+    modelPictureDragFromRef.current = null;
+    setModelPictureDragOverIndex(null);
+    setModelPictureDraggingIndex(null);
+  };
+
+  const handleModelPictureDragOver = (e, pi) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    setModelPictureDragOverIndex((cur) => (cur === pi ? cur : pi));
+  };
+
+  const handleModelPictureDrop = (e, dropIndex) => {
+    e.preventDefault();
+    const from = modelPictureDragFromRef.current;
+    modelPictureDragFromRef.current = null;
+    setModelPictureDragOverIndex(null);
+    setModelPictureDraggingIndex(null);
+    if (from == null || from === dropIndex) return;
+    reorderModelPictures(from, dropIndex);
+  };
+
+  const handleModelPictureDragLeaveCard = (e) => {
+    const rel = e.relatedTarget;
+    if (rel && e.currentTarget.contains(rel)) return;
+    setModelPictureDragOverIndex(null);
   };
 
   const handlePresetModalAdd = async () => {
@@ -1023,6 +2404,28 @@ export const Anuncios = ({ user }) => {
     });
   };
 
+  /** Pede ao backend uma validação prévia do modelo para um marketplace específico. */
+  const runModelValidation = useCallback(async (marketplace) => {
+    if (!modelEditModal?.id) {
+      toast.error('Salve o modelo antes de validar.');
+      return;
+    }
+    setModelValidationLoading(true);
+    try {
+      const r = await axios.post(`/api/ad-models/${modelEditModal.id}/validate-publish`, { marketplace });
+      setModelValidationResult({ marketplace, ...r.data });
+    } catch (e) {
+      setModelValidationResult({
+        marketplace,
+        ok: false,
+        issues: [{ code: 'server', message: e.response?.data?.error || e.message || 'Erro ao validar' }],
+        warnings: [],
+      });
+    } finally {
+      setModelValidationLoading(false);
+    }
+  }, [modelEditModal?.id, toast]);
+
   const handleModelPublish = async () => {
     if (!modelPublishModal) return;
     setModelPublishing(true);
@@ -1040,9 +2443,180 @@ export const Anuncios = ({ user }) => {
       fetchAdModels();
     } catch (e) {
       const d = e.response?.data;
-      toast.error(d?.error || d?.message || 'Erro ao publicar', { duration: 12000 });
+      const msg = d?.error || d?.message || 'Erro ao publicar';
+      toast.error(msg, { duration: 18000 });
+      // Se for Shopee com atributos faltando, abre direto a aba "Ficha técnica
+      // Shopee" no modal de edição, com os IDs faltantes já pré-criados vazios
+      // para o seller só preencher o valor.
+      const missingAttrs = d?.shopee?.missingAttributes || [];
+      const missingValueIds = d?.shopee?.missingValueIds || [];
+      if (missingAttrs.length > 0 || missingValueIds.length > 0) {
+        const model = adModels.find(m => m.id === modelPublishModal.modelId);
+        if (model) {
+          const mm = parseMarketplaceMappings(model.marketplace_mappings);
+          const currentAttrs = mm.channels.shopee.attributes || {};
+          const updatedAttrs = { ...currentAttrs };
+          for (const ma of missingAttrs) {
+            if (!updatedAttrs[String(ma.attribute_id)]) {
+              updatedAttrs[String(ma.attribute_id)] = { original_value_name: '', _suggested_name: ma.name };
+            }
+          }
+          const updatedMm = {
+            ...mm,
+            channels: { ...mm.channels, shopee: { ...mm.channels.shopee, attributes: updatedAttrs } },
+          };
+          setTimeout(() => {
+            setModelEditModal({
+              ...model,
+              description: model.description || '',
+              _attributes: (() => { try { return JSON.parse(model.attributes || '[]'); } catch { return []; } })(),
+              _variations: (() => { try { return JSON.parse(model.variations || '[]'); } catch { return []; } })(),
+              _shipping: (() => { try { return JSON.parse(model.shipping || 'null'); } catch { return null; } })(),
+              _sale_terms: (() => { try { return JSON.parse(model.sale_terms || '[]'); } catch { return []; } })(),
+              _pictures: (() => { try { return JSON.parse(model.pictures || '[]'); } catch { return []; } })(),
+              _package: parsePackageMeasuresFromModel(model),
+              _marketplace_mappings: updatedMm,
+              // Sinaliza ao ShopeeAttributesBlock pra abrir direto o painel de
+              // importação quando o erro foi por value_id faltando (pre-flight).
+              _openShopeeImport: missingValueIds.length > 0,
+            });
+            setModelEditViewTab('shopee');
+          }, 400);
+        }
+      }
     }
     setModelPublishing(false);
+  };
+
+  /** Abre o modal da biblioteca de mídia e dispara a busca inicial. */
+  const openMediaLibrary = () => {
+    setMediaLibrarySelected(new Set());
+    setMediaLibrarySearch('');
+    setMediaLibraryModal({ open: true });
+  };
+
+  useEffect(() => {
+    if (!mediaLibraryModal?.open) return;
+    const tid = setTimeout(async () => {
+      setMediaLibraryLoading(true);
+      try {
+        const r = await axios.get('/api/ad-models/media-library', { params: { search: mediaLibrarySearch || '', limit: 120 } });
+        setMediaLibraryItems(Array.isArray(r.data?.items) ? r.data.items : []);
+      } catch { setMediaLibraryItems([]); }
+      setMediaLibraryLoading(false);
+    }, 220);
+    return () => clearTimeout(tid);
+  }, [mediaLibrarySearch, mediaLibraryModal?.open]);
+
+  const addSelectedMediaToModel = () => {
+    const selected = mediaLibraryItems.filter((it) => mediaLibrarySelected.has(it.url));
+    if (selected.length === 0) { setMediaLibraryModal(null); return; }
+    setModelEditModal((p) => {
+      const existing = new Set((p._pictures || []).map((pic) => pic.source || pic.secure_url));
+      const newPics = selected
+        .filter((it) => !existing.has(it.url))
+        .map((it) => ({ id: `pic-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, source: it.url }));
+      return { ...p, _pictures: [...(p._pictures || []), ...newPics] };
+    });
+    setMediaLibraryModal(null);
+  };
+
+  /** Importa um anúncio (ML/Shopee) a partir de um ID fornecido manualmente. */
+  const handleImportById = async () => {
+    if (!importByIdModal) return;
+    const { marketplace, itemId, accountId } = importByIdModal;
+    if (!itemId || !accountId) {
+      toast.error('Preencha o ID do anúncio e selecione a conta');
+      return;
+    }
+    setImportByIdLoading(true);
+    try {
+      const payload = { marketplace, accountId: Number(accountId), forceOverwrite: true };
+      if (marketplace === 'shopee') payload.shopeeItemId = String(itemId).trim();
+      else payload.mlItemId = String(itemId).trim();
+      const r = await axios.post('/api/ad-models/import', payload);
+      toast.success(`Modelo importado: ${r.data?.model?.title || r.data?.model?.sku || 'OK'}`);
+      setImportByIdModal(null);
+      fetchAdModels();
+    } catch (e) {
+      const d = e.response?.data;
+      toast.error(d?.error || d?.message || 'Erro ao importar por ID', { duration: 10000 });
+    }
+    setImportByIdLoading(false);
+  };
+
+  /** Abre o modal de publicação multi-destino para um modelo, pré-selecionando nenhum destino. */
+  const openMultiPublishForModel = (model) => {
+    setMultiPublishResults(null);
+    setMultiPublishModal({
+      modelId: model.id,
+      modelTitle: model.title || '',
+      modelSku: model.sku || '',
+      basePrice: Number(model.price) || 0,
+      targets: [],
+    });
+  };
+
+  const toggleMultiTarget = (marketplace, accountId, accountName) => {
+    setMultiPublishModal((p) => {
+      if (!p) return p;
+      const idx = p.targets.findIndex((t) => t.marketplace === marketplace && Number(t.accountId) === Number(accountId));
+      const next = [...p.targets];
+      if (idx >= 0) next.splice(idx, 1);
+      else next.push({ marketplace, accountId, accountName, price: p.basePrice, listing_type_id: marketplace === 'ml' ? 'gold_special' : undefined, status: 'pending' });
+      return { ...p, targets: next };
+    });
+  };
+
+  const updateMultiTargetField = (marketplace, accountId, field, value) => {
+    setMultiPublishModal((p) => ({
+      ...p,
+      targets: p.targets.map((t) =>
+        t.marketplace === marketplace && Number(t.accountId) === Number(accountId) ? { ...t, [field]: value } : t
+      ),
+    }));
+  };
+
+  const handleMultiPublishRun = async () => {
+    if (!multiPublishModal) return;
+    if (multiPublishModal.targets.length === 0) {
+      toast.error('Selecione ao menos um destino');
+      return;
+    }
+    setMultiPublishRunning(true);
+    setMultiPublishResults(null);
+    setMultiPublishModal((p) => ({ ...p, targets: p.targets.map((t) => ({ ...t, status: 'running' })) }));
+    try {
+      const r = await axios.post(`/api/ad-models/${multiPublishModal.modelId}/publish-multi`, {
+        targets: multiPublishModal.targets.map((t) => ({
+          marketplace: t.marketplace,
+          accountId: Number(t.accountId),
+          price: Number(t.price) || undefined,
+          listing_type_id: t.listing_type_id || undefined,
+          available_quantity: t.available_quantity != null ? Number(t.available_quantity) : undefined,
+        })),
+      });
+      setMultiPublishResults(r.data);
+      setMultiPublishModal((p) => ({
+        ...p,
+        targets: p.targets.map((t) => {
+          const res = (r.data.results || []).find((x) => x.marketplace === t.marketplace && Number(x.accountId) === Number(t.accountId));
+          return { ...t, status: res?.success ? 'ok' : 'error', error: res?.success ? null : res?.error, item_id: res?.item_id, permalink: res?.permalink };
+        }),
+      }));
+      if (r.data.published > 0) {
+        toast.success(`${r.data.published}/${r.data.total} destino(s) publicado(s)`);
+        fetchAdModels();
+      }
+      if (r.data.published < r.data.total) {
+        toast.error(`${r.data.total - r.data.published} destino(s) com erro`, { duration: 10000 });
+      }
+    } catch (e) {
+      const d = e.response?.data;
+      toast.error(d?.error || d?.message || 'Erro ao publicar em múltiplos destinos', { duration: 12000 });
+      setMultiPublishModal((p) => ({ ...p, targets: p.targets.map((t) => ({ ...t, status: 'error', error: d?.error || e.message })) }));
+    }
+    setMultiPublishRunning(false);
   };
 
   const openModelBulkPublishModal = () => {
@@ -1131,12 +2705,17 @@ export const Anuncios = ({ user }) => {
 
   const formatPrice = (v) => v != null ? `R$ ${Number(v).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}` : '-';
 
+  // Busca inventário por SKU:
+  //   1) match exato (case-insensitive, trim)
+  //   2) prefixo exato — útil quando o marketplace concatena sufixos (ex.: ABC-01 → ABC)
+  // NÃO removemos mais letras do SKU (heurística antiga confundia SKUs alfanuméricos).
   const findInventoryBySku = useCallback((sku) => {
     if (!sku || !inventory.length) return null;
-    const skuClean = String(sku).replace(/[a-zA-Z]+/g, '').trim();
-    if (!skuClean) return null;
-    return inventory.find(inv => String(inv.sku) === skuClean)
-      || inventory.find(inv => String(inv.sku).startsWith(skuClean))
+    const clean = String(sku).trim();
+    if (!clean) return null;
+    const lower = clean.toLowerCase();
+    return inventory.find(inv => String(inv.sku || '').trim().toLowerCase() === lower)
+      || inventory.find(inv => String(inv.sku || '').trim().toLowerCase().startsWith(lower))
       || null;
   }, [inventory]);
   const sourceBadge = (item) => {
@@ -1147,25 +2726,18 @@ export const Anuncios = ({ user }) => {
   const isPaused = (item) => item.status === 'paused' || item.status === 'UNLIST';
   const canActivate = (item) => isPaused(item) || item.status === 'closed';
 
-  const filteredItems = items.filter(item => {
-    if (filterMarketplace !== 'all' && item.source !== filterMarketplace) return false;
-    if (filterAccount !== 'all') {
-      const accId = item.source === 'ml' ? item.ml_account_id : item.shopee_account_id;
-      if (String(accId) !== filterAccount) return false;
-    }
-    return true;
-  });
-
-  // Paginação
-  const totalPages = Math.max(1, Math.ceil(filteredItems.length / pageSize));
-  const startIdx = (currentPage - 1) * pageSize;
-  const paginatedItems = filteredItems.slice(startIdx, startIdx + pageSize);
+  // A filtragem (marketplace/conta/busca) e a paginação acontecem no backend
+  // via /api/ad-items, então aqui só usamos a página corrente recebida.
+  const filteredItems = items;
+  const totalPages = itemsTotalPages;
+  const paginatedItems = items;
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [debouncedSearch, filterMarketplace, filterAccount]);
+  }, [debouncedSearch, filterMarketplace, filterAccount, filterStatus, filterLinked, filterHasStock, filterDivergence]);
 
-  const mlItemsCount = filteredItems.filter(i => i.source === 'ml').length;
+  // Quantos itens da página atual são selecionáveis para "Selecionar todos".
+  const importableItemsCount = paginatedItems.filter((i) => i.source === 'ml' || i.source === 'shopee').length;
 
   const allAccounts = [
     ...mlAccounts.map(a => ({ id: a.id, name: a.name, source: 'ml' })),
@@ -1202,28 +2774,71 @@ export const Anuncios = ({ user }) => {
                   {importing ? 'Importando...' : `Importar (${selectedItems.size})`}
                 </button>
               )}
-          <button onClick={handleSyncAll} disabled={syncing}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded-lg transition-colors disabled:opacity-50 flex items-center gap-2">
-            <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
-            {syncing ? 'Sincronizando...' : 'Sincronizar'}
-          </button>
-          <button onClick={handlePushAll} disabled={pushingAll}
-            className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white text-sm rounded-lg transition-colors disabled:opacity-50 flex items-center gap-2">
-            <Upload className={`w-4 h-4 ${pushingAll ? 'animate-spin' : ''}`} />
-            {pushingAll ? 'Enviando...' : 'Enviar Estoque'}
-          </button>
-            </>
-          )}
-          {activeTab === 'modelos' && selectedTemplates.size > 0 && (
-            <>
-              <button onClick={openBulkPublishModal}
-                className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white text-sm rounded-lg transition-colors flex items-center gap-2">
-                <Send className="w-4 h-4" /> Publicar ({selectedTemplates.size})
-              </button>
-              <button onClick={handleDeleteSelectedTemplates}
-                className="px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-sm rounded-lg transition-colors flex items-center gap-2">
-                <Trash2 className="w-4 h-4" /> Excluir ({selectedTemplates.size})
-              </button>
+          {/* Menu consolidado de sincronização — agrupa 'Sync rápido',
+              'Sincronizar' e 'Enviar Estoque' num único botão discreto. */}
+          <div className="relative" ref={syncMenuRef}>
+            <button
+              onClick={() => setSyncMenuOpen(v => !v)}
+              disabled={syncing || syncingFast || pushingAll}
+              title="Ações de sincronização e envio de estoque"
+              className="px-3 py-2 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-800 dark:text-gray-100 text-sm rounded-lg transition-colors disabled:opacity-50 flex items-center gap-2 border border-gray-200 dark:border-gray-600">
+              {(syncing || syncingFast || pushingAll) ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <RefreshCw className="w-4 h-4" />
+              )}
+              <span className="hidden sm:inline">
+                {syncingFast ? 'Sync rápido…' : syncing ? 'Sincronizando…' : pushingAll ? 'Enviando…' : 'Sincronização'}
+              </span>
+              <ChevronDown className={`w-3.5 h-3.5 transition-transform ${syncMenuOpen ? 'rotate-180' : ''}`} />
+            </button>
+            {syncMenuOpen && (
+              <div className="absolute right-0 mt-2 w-72 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-30 overflow-hidden">
+                <button
+                  onClick={() => { setSyncMenuOpen(false); handleSyncFast(); }}
+                  disabled={syncingFast || syncing}
+                  className="w-full px-3 py-2.5 text-left hover:bg-gray-50 dark:hover:bg-gray-700/60 flex items-start gap-3 disabled:opacity-50">
+                  <Zap className={`w-4 h-4 text-sky-500 mt-0.5 ${syncingFast ? 'animate-pulse' : ''}`} />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-gray-900 dark:text-white">
+                      {syncingFast ? 'Sync rápido…' : 'Sync rápido'}
+                    </div>
+                    <div className="text-[11px] text-gray-500 dark:text-gray-400">
+                      Atualiza apenas itens novos ou alterados
+                    </div>
+                  </div>
+                </button>
+                <button
+                  onClick={() => { setSyncMenuOpen(false); handleSyncAll(); }}
+                  disabled={syncing || syncingFast}
+                  className="w-full px-3 py-2.5 text-left hover:bg-gray-50 dark:hover:bg-gray-700/60 flex items-start gap-3 disabled:opacity-50 border-t border-gray-100 dark:border-gray-700">
+                  <RefreshCw className={`w-4 h-4 text-blue-500 mt-0.5 ${syncing ? 'animate-spin' : ''}`} />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-gray-900 dark:text-white">
+                      {syncing ? 'Sincronizando…' : 'Sincronizar tudo'}
+                    </div>
+                    <div className="text-[11px] text-gray-500 dark:text-gray-400">
+                      Busca todos os anúncios de todas as contas
+                    </div>
+                  </div>
+                </button>
+                <button
+                  onClick={() => { setSyncMenuOpen(false); handlePushAll(); }}
+                  disabled={pushingAll}
+                  className="w-full px-3 py-2.5 text-left hover:bg-gray-50 dark:hover:bg-gray-700/60 flex items-start gap-3 disabled:opacity-50 border-t border-gray-100 dark:border-gray-700">
+                  <Upload className={`w-4 h-4 text-green-600 mt-0.5 ${pushingAll ? 'animate-spin' : ''}`} />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-gray-900 dark:text-white">
+                      {pushingAll ? 'Enviando…' : 'Enviar estoque'}
+                    </div>
+                    <div className="text-[11px] text-gray-500 dark:text-gray-400">
+                      Publica o estoque atual em todos os marketplaces
+                    </div>
+                  </div>
+                </button>
+              </div>
+            )}
+          </div>
             </>
           )}
         </div>
@@ -1232,7 +2847,8 @@ export const Anuncios = ({ user }) => {
       {/* === TAB: ANÚNCIOS ATIVOS === */}
       {activeTab === 'ativos' && (
       <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-4">
-          <div className="flex flex-col md:flex-row items-start md:items-center gap-3 mb-4">
+          {/* Linha 1 — Busca + marketplace + conta + paginação. */}
+          <div className="flex flex-col md:flex-row items-start md:items-center gap-3 mb-3">
             <div className="flex items-center gap-2 flex-1 min-w-0">
               <Search className="w-5 h-5 text-gray-400 flex-shrink-0" />
           <input type="text" placeholder="Buscar por título, ID ou SKU..." value={search} onChange={e => setSearch(e.target.value)}
@@ -1258,7 +2874,12 @@ export const Anuncios = ({ user }) => {
                 </div>
               )}
               <div className="flex items-center gap-2">
-                <span className="text-xs text-gray-400">{filteredItems.length} anúncios</span>
+                <span className="text-xs text-gray-400">
+                  {itemsTotal} {itemsTotal === 1 ? 'anúncio' : 'anúncios'}
+                  {filterMarketplace === 'all' && (itemsTotals.ml > 0 || itemsTotals.shopee > 0) && (
+                    <span className="ml-1 opacity-75">· ML {itemsTotals.ml} · Shopee {itemsTotals.shopee}</span>
+                  )}
+                </span>
                 <select value={pageSize} onChange={e => { setPageSize(Number(e.target.value)); setCurrentPage(1); }}
                   className="pl-2 pr-7 py-1.5 border dark:border-gray-600 rounded-lg text-xs bg-white dark:bg-gray-700 text-gray-900 dark:text-white appearance-none">
                   {[20, 50, 100, 150].map(n => <option key={n} value={n}>{n} por página</option>)}
@@ -1266,6 +2887,152 @@ export const Anuncios = ({ user }) => {
               </div>
             </div>
           </div>
+
+          {/* Linha 2 — Filtros avançados, colapsáveis atrás de um botão discreto.
+              Quando fechado, mostramos apenas um resumo dos filtros ativos. */}
+          {(() => {
+            const activeFilters = [];
+            if (filterStatus !== 'all') {
+              const lbl = { active: 'Ativos', paused: 'Pausados', closed: 'Encerrados' }[filterStatus] || filterStatus;
+              activeFilters.push({ key: 'status', label: lbl, clear: () => setFilterStatus('all') });
+            }
+            if (filterLinked !== 'all') {
+              activeFilters.push({ key: 'linked', label: filterLinked === 'linked' ? 'Vinculados' : 'Sem vínculo', clear: () => setFilterLinked('all') });
+            }
+            if (filterHasStock !== 'all') {
+              activeFilters.push({ key: 'stock', label: filterHasStock === 'yes' ? 'Com estoque' : 'Sem estoque', clear: () => setFilterHasStock('all') });
+            }
+            if (filterDivergence) {
+              activeFilters.push({ key: 'div', label: 'Divergente', clear: () => setFilterDivergence(false) });
+            }
+            const activeCount = activeFilters.length;
+            return (
+              <div className="mb-4 text-xs">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    onClick={() => setFiltersOpen(v => !v)}
+                    className={`px-2.5 py-1.5 rounded-md font-medium border flex items-center gap-2 transition-colors ${filtersOpen || activeCount > 0 ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-800' : 'border-gray-200 dark:border-gray-700 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}`}>
+                    <SlidersHorizontal className="w-3.5 h-3.5" />
+                    <span>Filtros</span>
+                    {activeCount > 0 && (
+                      <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-blue-600 text-white text-[10px] font-semibold">{activeCount}</span>
+                    )}
+                    <ChevronDown className={`w-3.5 h-3.5 transition-transform ${filtersOpen ? 'rotate-180' : ''}`} />
+                  </button>
+                  {/* Chips compactos dos filtros ativos (visíveis mesmo com o painel fechado). */}
+                  {!filtersOpen && activeFilters.map(f => (
+                    <span key={f.key} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 text-[11px]">
+                      {f.label}
+                      <button onClick={f.clear} className="hover:text-red-500" title="Remover filtro">
+                        <X className="w-3 h-3" />
+                      </button>
+                    </span>
+                  ))}
+                  {!filtersOpen && activeCount > 1 && (
+                    <button onClick={() => { setFilterStatus('all'); setFilterLinked('all'); setFilterHasStock('all'); setFilterDivergence(false); }}
+                      className="text-blue-600 dark:text-blue-400 hover:underline">Limpar</button>
+                  )}
+                </div>
+                {filtersOpen && (
+                  <div className="mt-2 p-3 rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/40 flex items-center gap-2 flex-wrap">
+                    <div className="flex items-center gap-1 bg-white dark:bg-gray-700 rounded-lg p-0.5 border border-gray-200 dark:border-gray-600">
+                      {[
+                        { value: 'all', label: 'Qualquer status' },
+                        { value: 'active', label: 'Ativos' },
+                        { value: 'paused', label: 'Pausados' },
+                        { value: 'closed', label: 'Encerrados' },
+                      ].map(opt => (
+                        <button key={opt.value} onClick={() => setFilterStatus(opt.value)}
+                          className={`px-2.5 py-1 rounded-md font-medium transition-colors ${filterStatus === opt.value ? 'bg-gray-100 dark:bg-gray-600 text-gray-900 dark:text-white shadow-sm' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}`}>
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="flex items-center gap-1 bg-white dark:bg-gray-700 rounded-lg p-0.5 border border-gray-200 dark:border-gray-600">
+                      {[
+                        { value: 'all', label: 'Vínculo: todos' },
+                        { value: 'linked', label: 'Vinculados' },
+                        { value: 'unlinked', label: 'Sem vínculo' },
+                      ].map(opt => (
+                        <button key={opt.value} onClick={() => setFilterLinked(opt.value)}
+                          className={`px-2.5 py-1 rounded-md font-medium transition-colors ${filterLinked === opt.value ? 'bg-gray-100 dark:bg-gray-600 text-gray-900 dark:text-white shadow-sm' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}`}>
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="flex items-center gap-1 bg-white dark:bg-gray-700 rounded-lg p-0.5 border border-gray-200 dark:border-gray-600">
+                      {[
+                        { value: 'all', label: 'Estoque: todos' },
+                        { value: 'yes', label: 'Com estoque' },
+                        { value: 'no', label: 'Sem estoque' },
+                      ].map(opt => (
+                        <button key={opt.value} onClick={() => setFilterHasStock(opt.value)}
+                          className={`px-2.5 py-1 rounded-md font-medium transition-colors ${filterHasStock === opt.value ? 'bg-gray-100 dark:bg-gray-600 text-gray-900 dark:text-white shadow-sm' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}`}>
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                    <button onClick={() => setFilterDivergence(v => !v)}
+                      title="Mostra apenas configs com 'usar real' ligado e estoque do marketplace diferente do real"
+                      className={`px-2.5 py-1 rounded-md font-medium border transition-colors ${filterDivergence ? 'bg-amber-100 dark:bg-amber-900/40 text-amber-800 dark:text-amber-300 border-amber-300 dark:border-amber-700' : 'bg-white dark:bg-gray-700 border-gray-200 dark:border-gray-600 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}`}>
+                      Divergente
+                    </button>
+                    {activeCount > 0 && (
+                      <button onClick={() => { setFilterStatus('all'); setFilterLinked('all'); setFilterHasStock('all'); setFilterDivergence(false); }}
+                        className="text-blue-600 dark:text-blue-400 hover:underline ml-auto">Limpar filtros</button>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* Barra de ações em massa — só aparece quando há seleção. */}
+          {selectedItems.size > 0 && (
+            <div className="mb-4 px-3 py-2 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg flex items-center gap-2 flex-wrap text-xs">
+              <span className="text-blue-700 dark:text-blue-300 font-medium">
+                {selectedItems.size} selecionado{selectedItems.size === 1 ? '' : 's'}
+              </span>
+              <span className="text-blue-300 dark:text-blue-700">|</span>
+              <button onClick={() => handleBulkChangeStatus('active')} disabled={!!bulkRunning}
+                className="px-2.5 py-1 rounded-md bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 hover:bg-green-50 dark:hover:bg-green-900/30 text-green-700 dark:text-green-400 font-medium disabled:opacity-50 flex items-center gap-1">
+                {bulkRunning === 'activate' ? <Loader2 className="w-3 h-3 animate-spin" /> : <CheckCircle className="w-3 h-3" />}
+                Ativar
+              </button>
+              <button onClick={() => handleBulkChangeStatus('paused')} disabled={!!bulkRunning}
+                className="px-2.5 py-1 rounded-md bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 hover:bg-yellow-50 dark:hover:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400 font-medium disabled:opacity-50 flex items-center gap-1">
+                {bulkRunning === 'pause' ? <Loader2 className="w-3 h-3 animate-spin" /> : <AlertTriangle className="w-3 h-3" />}
+                Pausar
+              </button>
+              <button onClick={handleBulkLinkBySku} disabled={!!bulkRunning}
+                title="Tenta vincular cada item ao inventário usando o SKU exato."
+                className="px-2.5 py-1 rounded-md bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 hover:bg-blue-50 dark:hover:bg-blue-900/30 text-blue-700 dark:text-blue-400 font-medium disabled:opacity-50 flex items-center gap-1">
+                {bulkRunning === 'link' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Link2 className="w-3 h-3" />}
+                Vincular por SKU
+              </button>
+              <button onClick={handleBulkPush} disabled={!!bulkRunning}
+                className="px-2.5 py-1 rounded-md bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 hover:bg-emerald-50 dark:hover:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 font-medium disabled:opacity-50 flex items-center gap-1">
+                {bulkRunning === 'push' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Upload className="w-3 h-3" />}
+                Enviar estoque
+              </button>
+              <button onClick={handleBulkRefresh} disabled={!!bulkRunning}
+                title="Atualiza informações dos itens ML diretamente do Mercado Livre."
+                className="px-2.5 py-1 rounded-md bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 hover:bg-violet-50 dark:hover:bg-violet-900/30 text-violet-700 dark:text-violet-400 font-medium disabled:opacity-50 flex items-center gap-1">
+                {bulkRunning === 'refresh' ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+                Atualizar do ML
+              </button>
+              <button onClick={() => openRangeModal({ mode: 'bulk', items: Array.from(selectedItems.values()).filter(i => i && i.config_id) })} disabled={!!bulkRunning}
+                title="Aplica a mesma faixa fictícia para todos os selecionados com vínculo."
+                className="px-2.5 py-1 rounded-md bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 hover:bg-amber-50 dark:hover:bg-amber-900/30 text-amber-700 dark:text-amber-400 font-medium disabled:opacity-50 flex items-center gap-1">
+                <Edit3 className="w-3 h-3" /> Ajustar faixa
+              </button>
+              <span className="text-blue-300 dark:text-blue-700">|</span>
+              <button onClick={clearSelection}
+                className="px-2 py-1 text-blue-700 dark:text-blue-400 hover:underline font-medium">
+                Limpar seleção
+              </button>
+            </div>
+          )}
         {loading ? (
           <div className="flex justify-center py-12"><RefreshCw className="w-8 h-8 text-blue-500 animate-spin" /></div>
           ) : filteredItems.length === 0 ? (
@@ -1281,8 +3048,10 @@ export const Anuncios = ({ user }) => {
               <thead>
                 <tr className="border-b dark:border-gray-700 text-gray-600 dark:text-gray-400 font-medium text-xs">
                     <th className="py-3 px-2 w-8">
-                      <input type="checkbox" checked={selectedItems.size > 0 && selectedItems.size === mlItemsCount} onChange={toggleSelectAll}
-                        className="rounded border-gray-300 dark:border-gray-600" title="Selecionar todos ML" />
+                      <input type="checkbox"
+                        checked={importableItemsCount > 0 && paginatedItems.every((i) => selectedItems.has(itemKey(i)))}
+                        onChange={toggleSelectAll}
+                        className="rounded border-gray-300 dark:border-gray-600" title="Selecionar todos (ML + Shopee) desta página" />
                     </th>
                   <th className="text-left py-3 px-3">Anúncio</th>
                     <th className="text-left py-3 px-2">SKU</th>
@@ -1291,11 +3060,12 @@ export const Anuncios = ({ user }) => {
                     <th className="text-center py-3 px-2">Variação</th>
                     <th className="text-left py-3 px-2">Vinculado</th>
                   <th className="text-right py-3 px-2">Preço</th>
-                  <th className="text-center py-3 px-2">Real</th>
+                  <th className="text-center py-3 px-2" title="Saldo do SKU no estoque Miti (para compostos, calculado pelos componentes)">Real</th>
+                  <th className="text-center py-3 px-2" title="Real menos pedidos em aberto — é a base do que será enviado para o canal">Disponível</th>
                     <th className="text-center py-3 px-2">MKT</th>
                   <th className="text-center py-3 px-2">Faixa</th>
-                  <th className="text-center py-3 px-2">Usar Real</th>
-                  <th className="text-center py-3 px-2">Sync</th>
+                  <th className="text-center py-3 px-2" title="Enviar quantidade real; se desligado, usa a faixa fictícia">Usar Real</th>
+                  <th className="text-center py-3 px-2" title="Quando ligada, estoque é enviado automaticamente após cada movimentação.">Automação</th>
                   <th className="text-center py-3 px-2">Ações</th>
                 </tr>
               </thead>
@@ -1305,6 +3075,11 @@ export const Anuncios = ({ user }) => {
                   const st = statusMap[item.status] || { label: item.status || '-', cls: 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400' };
                   const hasDiscount = item.original_price && item.original_price > item.price;
                   const isCatalog = item.source === 'ml' && !!item.is_catalog_listing;
+                  // Indicadores derivados — usados como badges de alerta na linha.
+                  const noLink = !linked && (item.variation_count || 0) === 0;
+                  const stockMkt = item.stock_qty;
+                  const noStock = (stockMkt == null || Number(stockMkt) === 0) && (item.variation_count || 0) === 0;
+                  const divergent = linked && !!item.use_real_stock && Math.abs(Number(stockMkt || 0) - Number(item.real_quantity || 0)) > 0;
                   const pushKey = `${item.source}-${item.config_id}`;
                     const selectKey = `${item.source}:${item.item_id_display}:${item.source === 'ml' ? item.ml_account_id : item.shopee_account_id}`;
                     const isExpanded = expandedItems.has(item.uid);
@@ -1313,7 +3088,7 @@ export const Anuncios = ({ user }) => {
                       <React.Fragment key={item.uid}>
                       <tr className={`border-b dark:border-gray-700/50 hover:bg-gray-50 dark:hover:bg-gray-700/30 transition-colors ${isExpanded ? 'bg-violet-50/30 dark:bg-violet-900/10' : ''}`}>
                         <td className="py-2.5 px-2">
-                          {item.source === 'ml' && (
+                          {(item.source === 'ml' || item.source === 'shopee') && (
                             <input type="checkbox" checked={selectedItems.has(selectKey)} onChange={() => toggleSelectItem(item)}
                               className="rounded border-gray-300 dark:border-gray-600" />
                           )}
@@ -1330,6 +3105,23 @@ export const Anuncios = ({ user }) => {
                               {sourceBadge(item)}
                                 {item.account_name && <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 font-medium">{item.account_name}</span>}
                                 {isCatalog && <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-50 dark:bg-purple-900/30 text-purple-600 dark:text-purple-400 font-medium">Catálogo</span>}
+                                {noLink && <span title="Anúncio sem vínculo com o inventário" className="text-[10px] px-1.5 py-0.5 rounded bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-400 font-medium">Sem vínculo</span>}
+                                {noStock && isActive(item) && <span title="Sem estoque no marketplace" className="text-[10px] px-1.5 py-0.5 rounded bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400 font-medium">Sem estoque</span>}
+                                {divergent && (
+                                  <button onClick={() => setDivergenceModal(item)}
+                                    title="Ver detalhes e corrigir"
+                                    className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 font-medium hover:bg-amber-200 dark:hover:bg-amber-900/50">
+                                    Divergente
+                                  </button>
+                                )}
+                                {item.last_error_message && (
+                                  <span
+                                    title={`Último erro (${item.last_error_at || 's/ data'}): ${item.last_error_message}`}
+                                    className="text-[10px] px-1.5 py-0.5 rounded bg-rose-100 dark:bg-rose-900/30 text-rose-700 dark:text-rose-400 font-medium cursor-help"
+                                  >
+                                    Erro no último push
+                                  </span>
+                                )}
                             </div>
                           </div>
                         </div>
@@ -1383,14 +3175,75 @@ export const Anuncios = ({ user }) => {
                       </td>
                       <td className="py-2.5 px-2 text-right">
                         <div className="text-xs">
-                          <span className="text-gray-900 dark:text-white font-medium">{formatPrice(item.price)}</span>
+                          <div className="flex items-center justify-end gap-1 group">
+                            <span className="text-gray-900 dark:text-white font-medium">{formatPrice(item.price)}</span>
+                            {(item.variation_count || 0) === 0 && (
+                              <button onClick={() => openPriceEdit(item)}
+                                className="opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/30"
+                                title="Editar preço no marketplace">
+                                <Edit3 className="w-3 h-3" />
+                              </button>
+                            )}
+                          </div>
                             {hasDiscount && <span className="block text-[10px] text-gray-400 line-through">{formatPrice(item.original_price)}</span>}
                         </div>
                       </td>
-                        <td className="py-2.5 px-2 text-center font-mono text-sm">{item.variation_count > 0 ? '' : linked ? <span className={item.real_quantity <= 0 ? 'text-red-600 dark:text-red-400 font-bold' : 'text-gray-900 dark:text-white'}>{item.real_quantity ?? '-'}</span> : '-'}</td>
+                        <td className="py-2.5 px-2 text-center font-mono text-sm">
+                          {item.variation_count > 0 ? '' : linked ? (
+                            <div className="flex flex-col items-center gap-0.5">
+                              {(() => {
+                                const isComp = !!item.is_composite;
+                                const shown = isComp ? (item.composite_qty ?? 0) : (item.real_quantity ?? 0);
+                                return (
+                                  <span className={Number(shown) <= 0 ? 'text-red-600 dark:text-red-400 font-bold' : 'text-gray-900 dark:text-white'}
+                                    title={isComp ? `Saldo calculado por componentes: ${shown}` : `Saldo direto do SKU: ${shown}`}>
+                                    {shown}
+                                  </span>
+                                );
+                              })()}
+                              {(item.is_composite || item.has_components) && (
+                                <span title="Este SKU é composto (kit). Saldo = MIN(componente / receita)" className="text-[9px] px-1 rounded-full bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-400 font-semibold">
+                                  Composto
+                                </span>
+                              )}
+                            </div>
+                          ) : '-'}
+                        </td>
+                      <td className="py-2.5 px-2 text-center font-mono text-sm">
+                        {item.variation_count > 0 ? '' : linked ? (
+                          <div className="flex flex-col items-center gap-0.5">
+                            <span className={Number(item.real_available ?? 0) <= 0 ? 'text-red-600 dark:text-red-400 font-bold' : 'text-emerald-700 dark:text-emerald-400'}>
+                              {item.real_available ?? 0}
+                            </span>
+                            {Number(item.open_orders_qty) > 0 && (
+                              <span title={`${item.open_orders_qty} unidade(s) em pedidos abertos, descontados do real`} className="text-[9px] px-1 rounded-full bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 font-medium">
+                                -{item.open_orders_qty}
+                              </span>
+                            )}
+                          </div>
+                        ) : '-'}
+                      </td>
                       <td className="py-2.5 px-2 text-center font-mono text-sm text-gray-900 dark:text-white">{item.stock_qty ?? '-'}</td>
                       <td className="py-2.5 px-2 text-center">
-                          {item.variation_count > 0 ? '' : linked ? <span className="text-xs text-gray-600 dark:text-gray-400">{item.use_real_stock ? 'Real' : `${item.fictitious_min}-${item.fictitious_max}`}{item.fictitious_value != null && !item.use_real_stock && <span className="ml-1 text-yellow-600 dark:text-yellow-400">({item.fictitious_value})</span>}</span> : '-'}
+                          {item.variation_count > 0 ? '' : linked ? (() => {
+                            const preview = item.use_real_stock
+                              ? Number(item.real_available ?? 0)
+                              : (item.fictitious_value != null
+                                  ? Number(item.fictitious_value)
+                                  : Math.floor((Number(item.fictitious_min || 0) + Number(item.fictitious_max || 0)) / 2));
+                            return (
+                              <button
+                                type="button"
+                                onClick={() => openRangeModal(item)}
+                                className="text-xs text-gray-600 dark:text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:underline"
+                                title={`Próximo push enviará ${preview}`}>
+                                <div className="leading-tight">
+                                  <div>{item.use_real_stock ? 'Real' : `${item.fictitious_min}-${item.fictitious_max}`}</div>
+                                  <div className="text-[10px] text-emerald-700 dark:text-emerald-400 font-semibold">→ envia {preview}</div>
+                                </div>
+                              </button>
+                            );
+                          })() : '-'}
                       </td>
                       <td className="py-2.5 px-2 text-center">
                           {item.variation_count === 0 && linked && <button onClick={() => handleToggleRealStock(item)} title={item.use_real_stock ? 'Usando estoque real' : 'Usando estoque fictício'}>{item.use_real_stock ? <ToggleRight className="w-6 h-6 text-green-600 dark:text-green-400 mx-auto" /> : <ToggleLeft className="w-6 h-6 text-gray-400 mx-auto" />}</button>}
@@ -1400,7 +3253,7 @@ export const Anuncios = ({ user }) => {
                       </td>
                       <td className="py-2.5 px-2">
                         <div className="flex items-center justify-center gap-1 flex-wrap">
-                            {item.source === 'ml' && (
+                            {(item.source === 'ml' || item.source === 'shopee') && (
                               <button onClick={() => handleModelImportFromItem(item)}
                                 className="p-1.5 rounded-md bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400 hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors"
                                 title="Criar modelo de anúncio">
@@ -1411,53 +3264,70 @@ export const Anuncios = ({ user }) => {
                             {isActive(item) && <button onClick={() => handleChangeStatus(item, item.source === 'ml' ? 'paused' : 'UNLIST')} className="p-1.5 rounded-md bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-400 hover:bg-yellow-200 dark:hover:bg-yellow-900/50 transition-colors" title="Pausar"><Pause className="w-3.5 h-3.5" /></button>}
                             {canActivate(item) && <button onClick={() => handleChangeStatus(item, item.source === 'ml' ? 'active' : 'NORMAL')} className="p-1.5 rounded-md bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 hover:bg-green-200 dark:hover:bg-green-900/50 transition-colors" title="Ativar"><Play className="w-3.5 h-3.5" /></button>}
                             {item.permalink && <a href={item.permalink} target="_blank" rel="noreferrer" className="p-1.5 rounded-md bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors" title="Abrir"><ExternalLink className="w-3.5 h-3.5" /></a>}
+                            <button onClick={() => handleRefreshItem(item)}
+                              disabled={refreshingItem[`${item.source}-${item.uid}`]}
+                              className="p-1.5 rounded-md bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-400 hover:bg-violet-200 dark:hover:bg-violet-900/50 transition-colors disabled:opacity-50"
+                              title="Atualizar dados deste anúncio diretamente do marketplace">
+                              <RefreshCw className={`w-3.5 h-3.5 ${refreshingItem[`${item.source}-${item.uid}`] ? 'animate-spin' : ''}`} />
+                            </button>
+                            {linked && (
+                              <button onClick={() => openHistoryModal(item)}
+                                className="p-1.5 rounded-md bg-slate-100 dark:bg-slate-700/40 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700/60 transition-colors"
+                                title="Ver histórico de estoque">
+                                <History className="w-3.5 h-3.5" />
+                              </button>
+                            )}
                             {item.variation_count === 0 && linked && <button onClick={() => handleUnlink(item)} className="p-1.5 rounded-md bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-900/50 transition-colors" title="Desvincular"><Unlink className="w-3.5 h-3.5" /></button>}
                           </div>
                         </td>
                       </tr>
                       {isExpanded && itemVars.length > 0 && itemVars.map(v => {
-                        let combos = [];
-                        try { combos = JSON.parse(v.attribute_combinations || '[]'); } catch {}
-                        const comboStr = combos.map(c => `${c.name || c.id}: ${c.value_name || c.value_id || '?'}`).join(' | ');
+                        const combos = v.__combos || [];
+                        const comboStr = v.__combo_str || '';
+                        const vSku = v.__sku || '';
+                        const vRefId = v.__ref_id || '';
+                        const vAvailable = v.__available;
+                        const vThumb = v.__thumbnail;
                         const varLinked = !!v.var_config_id;
                         const varPushKey = `var-${v.var_config_id}`;
+                        const isMlVar = v.__src === 'ml';
                         return (
-                          <tr key={`var-${v.id}`} className="bg-violet-50/50 dark:bg-violet-900/10 border-b dark:border-gray-700/30">
+                          <tr key={`var-${v.__src}-${v.id}`} className="bg-violet-50/50 dark:bg-violet-900/10 border-b dark:border-gray-700/30">
                             <td className="py-1.5 px-2"></td>
                             <td className="py-1.5 px-3">
                               <div className="flex items-center gap-2 pl-4">
                                 <span className="w-1.5 h-1.5 rounded-full bg-violet-400 flex-shrink-0"></span>
-                                {v.thumbnail && <img src={v.thumbnail} alt="" className="w-7 h-7 rounded object-cover bg-gray-100 dark:bg-gray-700 flex-shrink-0" />}
+                                {vThumb && <img src={vThumb} alt="" className="w-7 h-7 rounded object-cover bg-gray-100 dark:bg-gray-700 flex-shrink-0" />}
                                 <div className="min-w-0">
-                                  {(() => { const inv = findInventoryBySku(v.sku); return inv ? (
+                                  {(() => { const inv = findInventoryBySku(vSku); return inv ? (
                                     <>
                                       <p className="text-xs text-violet-700 dark:text-violet-300 font-medium truncate max-w-[200px]" title={inv.title}>{inv.title}</p>
-                                      <span className="text-[10px] text-gray-400">{comboStr} | ID: {v.variation_id}</span>
+                                      <span className="text-[10px] text-gray-400">{comboStr || '—'} | ID: {vRefId}</span>
                                     </>
                                   ) : (
                                     <>
-                                      <p className="text-xs text-violet-700 dark:text-violet-300 font-medium">{comboStr || 'Variação ' + v.variation_id}</p>
-                                      <span className="text-[10px] text-gray-400">ID: {v.variation_id}</span>
+                                      <p className="text-xs text-violet-700 dark:text-violet-300 font-medium">{comboStr || `Variação ${vRefId}`}</p>
+                                      <span className="text-[10px] text-gray-400">ID: {vRefId}</span>
                                     </>
                                   ); })()}
                                 </div>
                               </div>
                             </td>
-                            <td className="py-1.5 px-2"><span className="text-xs font-mono text-gray-600 dark:text-gray-400">{v.sku || '-'}</span></td>
+                            <td className="py-1.5 px-2"><span className="text-xs font-mono text-gray-600 dark:text-gray-400">{vSku || '-'}</span></td>
                             <td className="py-1.5 px-2"></td>
                             <td className="py-1.5 px-2"></td>
                             <td className="py-1.5 px-2 text-center">
-                              {combos.map((c, ci) => (
+                              {combos.length > 0 ? combos.map((c, ci) => (
                                 <span key={ci} className="inline-block px-1.5 py-0.5 rounded text-[10px] font-medium bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-400 mr-0.5 mb-0.5">
                                   {c.value_name || c.value_id}
                                 </span>
-                              ))}
+                              )) : (comboStr ? <span className="text-[10px] text-gray-500 dark:text-gray-400">{comboStr}</span> : '')}
                             </td>
                             <td className="py-1.5 px-2">
                               {varLinked ? (
                                 <span className="flex items-center gap-1 text-green-700 dark:text-green-400 text-xs font-medium"><Link2 className="w-3 h-3" /> {v.var_linked_sku}</span>
                               ) : (() => {
-                                const invMatch = findInventoryBySku(v.sku);
+                                const invMatch = findInventoryBySku(vSku);
                                 return (
                                   <div className="flex flex-col gap-0.5">
                                     {invMatch && (
@@ -1476,7 +3346,10 @@ export const Anuncios = ({ user }) => {
                             <td className="py-1.5 px-2 text-center font-mono text-xs">
                               {varLinked ? <span className={v.var_real_quantity <= 0 ? 'text-red-600 dark:text-red-400 font-bold' : 'text-gray-700 dark:text-gray-300'}>{v.var_real_quantity ?? '-'}</span> : '-'}
                             </td>
-                            <td className="py-1.5 px-2 text-center font-mono text-xs text-gray-700 dark:text-gray-300">{v.available_quantity}</td>
+                            <td className="py-1.5 px-2 text-center font-mono text-xs text-gray-500 dark:text-gray-400">
+                              {varLinked ? <span title="Disponível em variações ainda não considera pedidos abertos nem kits — em breve." className="text-[10px]">—</span> : ''}
+                            </td>
+                            <td className="py-1.5 px-2 text-center font-mono text-xs text-gray-700 dark:text-gray-300">{vAvailable ?? '-'}</td>
                             <td className="py-1.5 px-2 text-center">
                               {varLinked ? <span className="text-[10px] text-gray-500">{v.var_use_real_stock ? 'Real' : `${v.var_fict_min}-${v.var_fict_max}`}{v.var_fict_value != null && !v.var_use_real_stock && <span className="ml-0.5 text-yellow-600 dark:text-yellow-400">({v.var_fict_value})</span>}</span> : ''}
                             </td>
@@ -1488,7 +3361,9 @@ export const Anuncios = ({ user }) => {
                             </td>
                             <td className="py-1.5 px-2">
                               <div className="flex items-center justify-center gap-1">
-                                <button onClick={() => { setManualStockModal(v); setManualStockQty(String(v.available_quantity || 0)); }} className="p-1 rounded bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 hover:bg-blue-200 dark:hover:bg-blue-900/50 transition-colors" title="Definir estoque manual"><Plus className="w-3 h-3" /></button>
+                                {isMlVar && (
+                                  <button onClick={() => { setManualStockModal(v); setManualStockQty(String(vAvailable || 0)); }} className="p-1 rounded bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 hover:bg-blue-200 dark:hover:bg-blue-900/50 transition-colors" title="Definir estoque manual"><Plus className="w-3 h-3" /></button>
+                                )}
                                 {varLinked && <button onClick={() => handleVarPush(v)} disabled={pushingVar[varPushKey]} className="p-1 rounded bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400 hover:bg-green-200 dark:hover:bg-green-900/50 transition-colors" title="Enviar estoque variação"><Upload className={`w-3 h-3 ${pushingVar[varPushKey] ? 'animate-spin' : ''}`} /></button>}
                                 {varLinked && <button onClick={() => handleVarUnlink(v)} className="p-1 rounded bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-900/50 transition-colors" title="Desvincular variação"><Unlink className="w-3 h-3" /></button>}
                               </div>
@@ -1505,7 +3380,7 @@ export const Anuncios = ({ user }) => {
             {totalPages > 1 && (
               <div className="flex items-center justify-between mt-4 pt-4 border-t dark:border-gray-700">
                 <span className="text-xs text-gray-500 dark:text-gray-400">
-                  Página {currentPage} de {totalPages} • {filteredItems.length} anúncios
+                  Página {currentPage} de {totalPages} • {itemsTotal} {itemsTotal === 1 ? 'anúncio' : 'anúncios'}
                 </span>
                 <div className="flex items-center gap-1">
                   <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage <= 1}
@@ -1551,6 +3426,11 @@ export const Anuncios = ({ user }) => {
                 className="px-3 py-2 bg-purple-600 hover:bg-purple-700 text-white text-sm rounded-lg transition-colors flex items-center gap-1.5">
                 <Download className="w-4 h-4" /> Importar de Anúncio
                             </button>
+              <button onClick={() => setImportByIdModal({ marketplace: 'ml', itemId: '', accountId: '' })}
+                className="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm rounded-lg transition-colors flex items-center gap-1.5"
+                title="Importar um anúncio fornecendo o ID do item (ML ou Shopee)">
+                <Link2 className="w-4 h-4" /> Importar por ID
+              </button>
               <button onClick={() => setModelEditModal({ title: '', sku: '', ean: '', price: 0, available_quantity: 1, listing_type_id: 'gold_special', condition: 'new', buying_mode: 'buy_it_now', currency_id: 'BRL', category_id: '', description: '', video_id: '', _attributes: [], _variations: [], _shipping: null, _sale_terms: [], _pictures: [], _package: DEFAULT_PACKAGE_FORM(), _marketplace_mappings: DEFAULT_MARKETPLACE_MAPPINGS() })}
                 className="px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded-lg transition-colors flex items-center gap-1.5">
                 <Plus className="w-4 h-4" /> Novo Modelo
@@ -1692,6 +3572,10 @@ export const Anuncios = ({ user }) => {
                                     <button onClick={() => { openPublishModalForModel(model); setOpenActionMenu(null); }}
                                       className="w-full text-left px-3 py-2 text-sm flex items-center gap-2.5 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
                                       <Send className="w-3.5 h-3.5 text-green-500" /> Publicar
+                                    </button>
+                                    <button onClick={() => { openMultiPublishForModel(model); setOpenActionMenu(null); }}
+                                      className="w-full text-left px-3 py-2 text-sm flex items-center gap-2.5 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
+                                      <Zap className="w-3.5 h-3.5 text-purple-500" /> Publicar em vários
                                     </button>
                                     <a href={`/api/ad-models/${model.id}/pictures/download`} target="_blank" rel="noreferrer"
                                       onClick={() => setOpenActionMenu(null)}
@@ -1941,6 +3825,202 @@ export const Anuncios = ({ user }) => {
         );
       })()}
 
+      {/* D5 — Modal de histórico de estoque (movimentos + auditoria) */}
+      {historyModal && (() => {
+        const labelForAction = (e) => {
+          if (e.kind === 'movement') {
+            const map = { in: 'Entrada', out: 'Saída', adjustment: 'Ajuste' };
+            return map[e.action] || e.action || 'Movimento';
+          }
+          const map = {
+            push_manual: 'Push manual',
+            push_auto: 'Push automático',
+            push_bulk: 'Push em massa',
+            config_update: 'Config. alterada',
+            config_bulk_range: 'Faixa em massa',
+          };
+          return map[e.action] || e.action || 'Ação';
+        };
+        return (
+          <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+            <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col p-6" style={{ animation: 'modalFadeIn 0.25s ease-out' }}>
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2">
+                  <History className="w-5 h-5" /> Histórico de estoque
+                </h3>
+                <button onClick={() => { setHistoryModal(null); setHistoryEntries([]); }} className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700"><X className="w-5 h-5" /></button>
+              </div>
+              <p className="text-sm text-gray-600 dark:text-gray-300 mb-2 truncate" title={historyModal.title}>
+                {historyModal.linked_sku ? <span className="font-mono text-xs mr-2">{historyModal.linked_sku}</span> : ''}
+                {historyModal.title}
+              </p>
+              <div className="flex-1 overflow-y-auto border dark:border-gray-700 rounded-lg min-h-0 divide-y divide-gray-100 dark:divide-gray-700/60">
+                {historyLoading ? (
+                  <div className="flex justify-center py-12"><Loader2 className="w-6 h-6 text-blue-500 animate-spin" /></div>
+                ) : historyEntries.length === 0 ? (
+                  <div className="text-center py-8 text-gray-400 text-sm">Nenhum registro encontrado</div>
+                ) : historyEntries.map((e, idx) => {
+                  const isMovement = e.kind === 'movement';
+                  const cls = isMovement
+                    ? (e.action === 'in' ? 'text-emerald-700 dark:text-emerald-400' : e.action === 'out' ? 'text-red-700 dark:text-red-400' : 'text-amber-700 dark:text-amber-400')
+                    : (e.action?.startsWith('push') ? 'text-blue-700 dark:text-blue-400' : 'text-violet-700 dark:text-violet-400');
+                  const when = e.created_at ? new Date(e.created_at) : null;
+                  return (
+                    <div key={`${e.kind}-${e.id}-${idx}`} className="px-3 py-2 text-xs flex items-start gap-3">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className={`font-semibold ${cls}`}>{labelForAction(e)}</span>
+                          {e.target_marketplace && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 uppercase">{e.target_marketplace}</span>
+                          )}
+                          {e.user_name && <span className="text-gray-500 dark:text-gray-400">por {e.user_name}</span>}
+                        </div>
+                        <div className="mt-0.5 text-gray-600 dark:text-gray-300">
+                          {isMovement ? (
+                            <>Qtd: <span className="font-mono">{e.before_value ?? '?'}</span> → <span className="font-mono font-semibold">{e.after_value ?? '?'}</span>{e.meta && <span className="ml-2 text-gray-400">— {e.meta}</span>}</>
+                          ) : (
+                            <>
+                              {e.before_value && <span className="font-mono text-[11px] text-gray-400">antes: {e.before_value} </span>}
+                              {e.after_value && <span className="font-mono text-[11px] text-gray-700 dark:text-gray-300">depois: {e.after_value}</span>}
+                            </>
+                          )}
+                        </div>
+                      </div>
+                      <span className="text-[10px] text-gray-500 dark:text-gray-400 whitespace-nowrap">{when ? when.toLocaleString('pt-BR') : '—'}</span>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="mt-3 flex justify-end">
+                <button onClick={() => { setHistoryModal(null); setHistoryEntries([]); }}
+                  className="px-4 py-2 bg-gray-200 dark:bg-gray-600 text-gray-700 dark:text-gray-200 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-500 text-sm transition-colors">Fechar</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* D2 — Modal de detalhes de divergência (real x marketplace) */}
+      {divergenceModal && (() => {
+        const real = Number(divergenceModal.real_quantity ?? 0);
+        const available = Number(divergenceModal.real_available ?? real);
+        const mkt = Number(divergenceModal.stock_qty ?? 0);
+        const diff = mkt - available;
+        const last = divergenceModal.last_pushed_at ? new Date(divergenceModal.last_pushed_at) : null;
+        const pushing_ = !!pushing[`${divergenceModal.source}-${divergenceModal.config_id}`];
+        return (
+          <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+            <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-md p-6" style={{ animation: 'modalFadeIn 0.25s ease-out' }}>
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-lg font-bold text-gray-900 dark:text-white">Detalhes da divergência</h3>
+                <button onClick={() => setDivergenceModal(null)} className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700"><X className="w-5 h-5" /></button>
+              </div>
+              <p className="text-sm text-gray-600 dark:text-gray-300 mb-3 truncate" title={divergenceModal.title}>{divergenceModal.title}</p>
+              <div className="grid grid-cols-3 gap-2 text-center text-xs mb-3">
+                <div className="p-2 bg-gray-50 dark:bg-gray-700/50 rounded-md">
+                  <div className="text-gray-500 dark:text-gray-400 mb-0.5">Real</div>
+                  <div className="text-base font-mono font-bold text-gray-900 dark:text-white">{real}</div>
+                </div>
+                <div className="p-2 bg-emerald-50 dark:bg-emerald-900/20 rounded-md">
+                  <div className="text-emerald-700 dark:text-emerald-400 mb-0.5">Disponível</div>
+                  <div className="text-base font-mono font-bold text-emerald-700 dark:text-emerald-400">{available}</div>
+                </div>
+                <div className="p-2 bg-amber-50 dark:bg-amber-900/20 rounded-md">
+                  <div className="text-amber-700 dark:text-amber-400 mb-0.5">Marketplace</div>
+                  <div className="text-base font-mono font-bold text-amber-700 dark:text-amber-400">{mkt}</div>
+                </div>
+              </div>
+              <div className="text-xs text-gray-600 dark:text-gray-400 space-y-1 mb-4">
+                <div>Diferença: <span className={`font-semibold ${diff > 0 ? 'text-red-600 dark:text-red-400' : 'text-blue-600 dark:text-blue-400'}`}>{diff > 0 ? `+${diff}` : diff}</span> (marketplace - disponível)</div>
+                <div>Último push: <span className="font-mono">{last ? last.toLocaleString('pt-BR') : '—'}</span></div>
+                {Number(divergenceModal.open_orders_qty) > 0 && (
+                  <div className="text-amber-700 dark:text-amber-400">
+                    {divergenceModal.open_orders_qty} un. em pedidos abertos já descontadas do disponível.
+                  </div>
+                )}
+                {divergenceModal.last_error_message && (
+                  <div className="text-rose-700 dark:text-rose-400 truncate" title={divergenceModal.last_error_message}>
+                    Último erro: {divergenceModal.last_error_message}
+                  </div>
+                )}
+              </div>
+              <div className="flex justify-end gap-2">
+                <button onClick={() => setDivergenceModal(null)}
+                  className="px-4 py-2 bg-gray-200 dark:bg-gray-600 text-gray-700 dark:text-gray-200 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-500 text-sm transition-colors">Fechar</button>
+                <button onClick={async () => { await handlePush(divergenceModal); setDivergenceModal(null); }} disabled={pushing_}
+                  className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 text-sm font-medium transition-colors disabled:opacity-50 flex items-center gap-2">
+                  {pushing_ ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                  Corrigir agora
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* C2 — Modal de ajuste de faixa fictícia (single / bulk) */}
+      {rangeModal && (() => {
+        const bulk = rangeModal?.mode === 'bulk';
+        const items = bulk ? (rangeModal.items || []) : [rangeModal];
+        const count = items.filter(i => i.config_id).length;
+        const minN = parseInt(rangeForm.min, 10);
+        const maxN = parseInt(rangeForm.max, 10);
+        const mid = Number.isFinite(minN) && Number.isFinite(maxN) && minN <= maxN ? Math.floor((minN + maxN) / 2) : null;
+        const invalid = !Number.isFinite(minN) || !Number.isFinite(maxN) || minN < 0 || maxN < 0 || minN > maxN;
+        return (
+          <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+            <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-md p-6" style={{ animation: 'modalFadeIn 0.25s ease-out' }}>
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-lg font-bold text-gray-900 dark:text-white">
+                  {bulk ? `Ajustar faixa fictícia (${count})` : 'Ajustar faixa fictícia'}
+                </h3>
+                <button onClick={() => setRangeModal(null)} className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700"><X className="w-5 h-5" /></button>
+              </div>
+              {!bulk && (
+                <p className="text-sm text-gray-600 dark:text-gray-300 mb-3 truncate" title={rangeModal.title}>
+                  {rangeModal.title}
+                </p>
+              )}
+              {bulk && (
+                <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">
+                  A mesma faixa será aplicada em {count} configuração(ões) selecionada(s) (ML + Shopee).
+                </p>
+              )}
+              <div className="grid grid-cols-2 gap-3">
+                <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                  Mínimo
+                  <input type="number" min="0" value={rangeForm.min}
+                    onChange={e => setRangeForm(f => ({ ...f, min: e.target.value }))}
+                    className="mt-1 w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white font-mono" autoFocus />
+                </label>
+                <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                  Máximo
+                  <input type="number" min="0" value={rangeForm.max}
+                    onChange={e => setRangeForm(f => ({ ...f, max: e.target.value }))}
+                    className="mt-1 w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white font-mono" />
+                </label>
+              </div>
+              <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">
+                {invalid ? (
+                  <span className="text-rose-600 dark:text-rose-400">Valores inválidos — verifique mínimo ≤ máximo.</span>
+                ) : (
+                  <>No próximo push sem "Usar Real" será enviado <span className="font-semibold text-gray-900 dark:text-gray-100">{mid}</span> (ponto médio).</>
+                )}
+              </p>
+              <div className="mt-5 flex justify-end gap-2">
+                <button onClick={() => setRangeModal(null)} disabled={rangeForm.saving}
+                  className="px-4 py-2 bg-gray-200 dark:bg-gray-600 text-gray-700 dark:text-gray-200 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-500 text-sm transition-colors disabled:opacity-50">Cancelar</button>
+                <button onClick={handleSaveRange} disabled={invalid || rangeForm.saving}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium transition-colors disabled:opacity-50 flex items-center gap-2">
+                  {rangeForm.saving && <Loader2 className="w-4 h-4 animate-spin" />}
+                  Salvar
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {manualStockModal && (() => {
         let combos = [];
         try { combos = JSON.parse(manualStockModal.attribute_combinations || '[]'); } catch {}
@@ -1969,9 +4049,41 @@ export const Anuncios = ({ user }) => {
         );
       })()}
 
+      {priceEditModal && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-md p-6" style={{ animation: 'modalFadeIn 0.25s ease-out' }}>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-gray-900 dark:text-white">Editar preço no marketplace</h3>
+              <button onClick={() => setPriceEditModal(null)} className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700"><X className="w-5 h-5" /></button>
+            </div>
+            <p className="text-sm text-gray-600 dark:text-gray-300 mb-1 truncate" title={priceEditModal.item.title}>{priceEditModal.item.title}</p>
+            <p className="text-[11px] text-gray-400 mb-3">
+              {priceEditModal.item.source === 'ml' ? 'Mercado Livre' : 'Shopee'} · {priceEditModal.item.item_id_display}
+            </p>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Novo preço (R$)</label>
+            <input type="number" min="0.01" step="0.01"
+              value={priceEditModal.value}
+              onChange={(e) => setPriceEditModal((m) => ({ ...m, value: e.target.value }))}
+              onKeyDown={(e) => e.key === 'Enter' && savePriceEdit()}
+              autoFocus
+              className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white font-mono text-lg" />
+            <p className="text-[10px] text-gray-400 mt-1">O valor será enviado diretamente ao marketplace.</p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button onClick={() => setPriceEditModal(null)} disabled={savingPrice}
+                className="px-4 py-2 bg-gray-200 dark:bg-gray-600 text-gray-700 dark:text-gray-200 rounded-lg hover:bg-gray-300 dark:hover:bg-gray-500 text-sm transition-colors disabled:opacity-50">Cancelar</button>
+              <button onClick={savePriceEdit} disabled={savingPrice}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium transition-colors disabled:opacity-50 flex items-center gap-2">
+                {savingPrice && <Loader2 className="w-4 h-4 animate-spin" />}
+                Enviar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {varLinkModal && (() => {
         const nonComposite = inventory.filter(i => !i.is_composite);
-        const varSku = (varLinkModal.sku || '').trim();
+        const varSku = ((varLinkModal.__sku ?? varLinkModal.sku) || '').trim();
 
         let suggestion = null;
         if (varSku) {
@@ -1987,9 +4099,12 @@ export const Anuncios = ({ user }) => {
           ? nonComposite.filter(inv => (inv.sku && inv.sku.toLowerCase().includes(searchLower)) || (inv.title && inv.title.toLowerCase().includes(searchLower)) || (inv.ean && inv.ean.toLowerCase().includes(searchLower)))
           : nonComposite;
 
-        let combos = [];
-        try { combos = JSON.parse(varLinkModal.attribute_combinations || '[]'); } catch {}
-        const comboStr = combos.map(c => `${c.name || c.id}: ${c.value_name || '?'}`).join(' | ');
+        const comboStr = varLinkModal.__combo_str || (() => {
+          let combos = [];
+          try { combos = JSON.parse(varLinkModal.attribute_combinations || '[]'); } catch { /* noop */ }
+          return combos.map(c => `${c.name || c.id}: ${c.value_name || '?'}`).join(' | ');
+        })();
+        const varRefId = varLinkModal.__ref_id ?? varLinkModal.variation_id ?? varLinkModal.model_id ?? '';
 
         return (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
@@ -1998,7 +4113,7 @@ export const Anuncios = ({ user }) => {
               <h3 className="text-lg font-bold text-gray-900 dark:text-white">Vincular Variação a SKU</h3>
               <button onClick={() => { setVarLinkModal(null); setLinkSearch(''); }} className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700"><X className="w-5 h-5" /></button>
             </div>
-            <p className="text-sm text-violet-600 dark:text-violet-400 mb-1">{comboStr || 'Variação ' + varLinkModal.variation_id}</p>
+            <p className="text-sm text-violet-600 dark:text-violet-400 mb-1">{comboStr || `Variação ${varRefId}`}</p>
             {varSku && <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">SKU da variação: <span className="font-mono font-semibold text-gray-700 dark:text-gray-300">{varSku}</span></p>}
 
             {suggestion && (
@@ -2044,439 +4159,185 @@ export const Anuncios = ({ user }) => {
         </div>
         );
       })()}
-
-      {/* Edit Template Modal */}
-      {editModal && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-3xl max-h-[90vh] overflow-y-auto p-6">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-bold text-gray-900 dark:text-white">Editar Template</h3>
-              <button onClick={() => setEditModal(null)} className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700"><X className="w-5 h-5" /></button>
-            </div>
-            <div className="space-y-4">
-
-              {editModal.title?.length > 60 && (
-                <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-700 rounded-lg p-3 text-xs text-yellow-700 dark:text-yellow-400">
-                  <AlertTriangle className="w-4 h-4 inline mr-1" />
-                  Título tem {editModal.title.length} caracteres. Algumas categorias limitam a 60 caracteres. Será truncado automaticamente na publicação.
-                </div>
-              )}
-
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Título ({editModal.title?.length || 0}/60)</label>
-                <input type="text" value={editModal.title} onChange={e => setEditModal(p => ({ ...p, title: e.target.value }))}
-                  className={`w-full px-3 py-2 border rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white ${editModal.title?.length > 60 ? 'border-yellow-400 dark:border-yellow-500' : 'dark:border-gray-600'}`} />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">ID Origem (ML)</label>
-                  <input type="text" value={editModal.source_ml_item_id || ''} readOnly
-                    className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-gray-50 dark:bg-gray-700/50 text-gray-500 dark:text-gray-400" />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Categoria</label>
-                  <input type="text" value={editModal.category_id || ''} onChange={e => setEditModal(p => ({ ...p, category_id: e.target.value }))}
-                    className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-4 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Preço (R$)</label>
-                  <input type="number" step="0.01" value={editModal.price} onChange={e => setEditModal(p => ({ ...p, price: e.target.value }))}
-                    className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Quantidade</label>
-                  <input type="number" value={editModal.available_quantity} onChange={e => setEditModal(p => ({ ...p, available_quantity: e.target.value }))}
-                    className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Tipo de anúncio (Mercado Livre)</label>
-                  <select value={editModal.listing_type_id} onChange={e => setEditModal(p => ({ ...p, listing_type_id: e.target.value }))}
-                    className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white">
-                    <option value="gold_pro">Premium</option>
-                    <option value="gold_special">Clássico</option>
-                    <option value="free">Grátis</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Condição</label>
-                  <select value={editModal.condition || 'new'} onChange={e => setEditModal(p => ({ ...p, condition: e.target.value }))}
-                    className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white">
-                    <option value="new">Novo</option>
-                    <option value="used">Usado</option>
-                    <option value="not_specified">Não especificado</option>
-                  </select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Modo de compra</label>
-                  <select value={editModal.buying_mode || 'buy_it_now'} onChange={e => setEditModal(p => ({ ...p, buying_mode: e.target.value }))}
-                    className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white">
-                    <option value="buy_it_now">Comprar agora</option>
-                    <option value="auction">Leilão</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Moeda</label>
-                  <input type="text" value={editModal.currency_id || 'BRL'} onChange={e => setEditModal(p => ({ ...p, currency_id: e.target.value }))}
-                    className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Descrição</label>
-                <textarea rows={5} value={editModal.description} onChange={e => setEditModal(p => ({ ...p, description: e.target.value }))}
-                  className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white resize-y" />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Video ID</label>
-                <input type="text" value={editModal.video_id || ''} onChange={e => setEditModal(p => ({ ...p, video_id: e.target.value }))}
-                  placeholder="(vazio)" className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
-              </div>
-
-              {/* Imagens */}
-              {editModal._pictures && editModal._pictures.length > 0 && (
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Imagens ({editModal._pictures.length})</label>
-                  <div className="flex gap-2 flex-wrap">
-                    {editModal._pictures.map((p, i) => <img key={i} src={p.source || p.secure_url} alt="" className="w-16 h-16 rounded object-cover bg-gray-100 dark:bg-gray-700" />)}
-                  </div>
-                </div>
-              )}
-
-              {/* Atributos */}
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-2">
-                  Atributos ({(editModal._attributes || []).length})
-                </label>
-                {(editModal._attributes || []).length > 0 ? (
-                  <div className="border dark:border-gray-600 rounded-lg overflow-hidden max-h-48 overflow-y-auto">
-                    <table className="w-full text-xs">
-                      <thead className="bg-gray-50 dark:bg-gray-700/50 sticky top-0">
-                        <tr>
-                          <th className="px-3 py-1.5 text-left text-gray-500 dark:text-gray-400 font-medium">ID</th>
-                          <th className="px-3 py-1.5 text-left text-gray-500 dark:text-gray-400 font-medium">Nome</th>
-                          <th className="px-3 py-1.5 text-left text-gray-500 dark:text-gray-400 font-medium">Valor</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y dark:divide-gray-700">
-                        {editModal._attributes.map((attr, i) => (
-                          <tr key={i} className="hover:bg-gray-50 dark:hover:bg-gray-700/30">
-                            <td className="px-3 py-1.5 text-gray-500 dark:text-gray-400 font-mono">{attr.id}</td>
-                            <td className="px-3 py-1.5 text-gray-700 dark:text-gray-300">{attr.name || '-'}</td>
-                            <td className="px-3 py-1.5">
-                              <input type="text" value={attr.value_name || attr.value_id || ''}
-                                onChange={e => {
-                                  const updated = [...editModal._attributes];
-                                  updated[i] = { ...updated[i], value_name: e.target.value };
-                                  setEditModal(p => ({ ...p, _attributes: updated }));
-                                }}
-                                className="w-full px-2 py-0.5 border dark:border-gray-600 rounded text-xs bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                                placeholder="(vazio)" />
-                      </td>
-                    </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <p className="text-xs text-gray-400 italic">Nenhum atributo importado</p>
-                )}
-              </div>
-
-              {/* Variações */}
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-2">
-                  Variações ({(editModal._variations || []).length})
-                </label>
-                {(editModal._variations || []).length > 0 ? (
-                  <div className="border dark:border-gray-600 rounded-lg overflow-hidden max-h-52 overflow-y-auto">
-                    <table className="w-full text-xs">
-                      <thead className="bg-gray-50 dark:bg-gray-700/50 sticky top-0">
-                        <tr>
-                          <th className="px-3 py-1.5 text-left text-gray-500 dark:text-gray-400 font-medium">Combinação</th>
-                          <th className="px-3 py-1.5 text-left text-gray-500 dark:text-gray-400 font-medium">SKU</th>
-                          <th className="px-3 py-1.5 text-left text-gray-500 dark:text-gray-400 font-medium">Qtd</th>
-                          <th className="px-3 py-1.5 text-left text-gray-500 dark:text-gray-400 font-medium">Preço</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y dark:divide-gray-700">
-                        {editModal._variations.map((v, i) => (
-                          <tr key={i} className="hover:bg-gray-50 dark:hover:bg-gray-700/30">
-                            <td className="px-3 py-1.5 text-gray-700 dark:text-gray-300">
-                              {(v.attribute_combinations || []).map(ac => `${ac.name || ac.id}: ${ac.value_name || ac.value_id}`).join(', ') || '-'}
-                            </td>
-                            <td className="px-3 py-1.5">
-                              <input type="text" value={v.seller_custom_field || ''}
-                                onChange={e => {
-                                  const updated = [...editModal._variations];
-                                  updated[i] = { ...updated[i], seller_custom_field: e.target.value };
-                                  setEditModal(p => ({ ...p, _variations: updated }));
-                                }}
-                                className="w-full px-2 py-0.5 border dark:border-gray-600 rounded text-xs bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                                placeholder="(vazio)" />
-                            </td>
-                            <td className="px-3 py-1.5">
-                              <input type="number" value={v.available_quantity || 0}
-                                onChange={e => {
-                                  const updated = [...editModal._variations];
-                                  updated[i] = { ...updated[i], available_quantity: parseInt(e.target.value, 10) || 0 };
-                                  setEditModal(p => ({ ...p, _variations: updated }));
-                                }}
-                                className="w-16 px-2 py-0.5 border dark:border-gray-600 rounded text-xs bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
-                            </td>
-                            <td className="px-3 py-1.5">
-                              <input type="number" step="0.01" value={v.price || ''}
-                                onChange={e => {
-                                  const updated = [...editModal._variations];
-                                  updated[i] = { ...updated[i], price: parseFloat(e.target.value) || 0 };
-                                  setEditModal(p => ({ ...p, _variations: updated }));
-                                }}
-                                className="w-20 px-2 py-0.5 border dark:border-gray-600 rounded text-xs bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                                placeholder="(vazio)" />
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <p className="text-xs text-gray-400 italic">Nenhuma variação</p>
-                )}
-              </div>
-
-              {/* Termos de Venda */}
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-2">
-                  Termos de Venda ({(editModal._sale_terms || []).length})
-                </label>
-                {(editModal._sale_terms || []).length > 0 ? (
-                  <div className="border dark:border-gray-600 rounded-lg overflow-hidden max-h-36 overflow-y-auto">
-                    <table className="w-full text-xs">
-                      <thead className="bg-gray-50 dark:bg-gray-700/50 sticky top-0">
-                        <tr>
-                          <th className="px-3 py-1.5 text-left text-gray-500 dark:text-gray-400 font-medium">ID</th>
-                          <th className="px-3 py-1.5 text-left text-gray-500 dark:text-gray-400 font-medium">Nome</th>
-                          <th className="px-3 py-1.5 text-left text-gray-500 dark:text-gray-400 font-medium">Valor</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y dark:divide-gray-700">
-                        {editModal._sale_terms.map((t, i) => (
-                          <tr key={i} className="hover:bg-gray-50 dark:hover:bg-gray-700/30">
-                            <td className="px-3 py-1.5 text-gray-500 dark:text-gray-400 font-mono">{t.id}</td>
-                            <td className="px-3 py-1.5 text-gray-700 dark:text-gray-300">{t.name || '-'}</td>
-                            <td className="px-3 py-1.5 text-gray-700 dark:text-gray-300">{t.value_name || t.value_id || '-'}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <p className="text-xs text-gray-400 italic">Nenhum termo de venda</p>
-                )}
-              </div>
-
-              {/* Shipping (somente leitura) */}
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-2">Frete (da origem - não será enviado na publicação)</label>
-                {editModal._shipping ? (
-                  <div className="bg-gray-50 dark:bg-gray-700/30 border dark:border-gray-600 rounded-lg p-3 text-xs space-y-1">
-                    <div className="grid grid-cols-2 gap-x-4">
-                      <span className="text-gray-500 dark:text-gray-400">Modo:</span>
-                      <span className="text-gray-700 dark:text-gray-300">{editModal._shipping.mode || '-'}</span>
-                      <span className="text-gray-500 dark:text-gray-400">Tipo logístico:</span>
-                      <span className="text-gray-700 dark:text-gray-300">{editModal._shipping.logistic_type || '-'}</span>
-                      <span className="text-gray-500 dark:text-gray-400">Frete grátis:</span>
-                      <span className="text-gray-700 dark:text-gray-300">{editModal._shipping.free_shipping ? 'Sim' : 'Não'}</span>
-                      <span className="text-gray-500 dark:text-gray-400">Retirada no local:</span>
-                      <span className="text-gray-700 dark:text-gray-300">{editModal._shipping.local_pick_up ? 'Sim' : 'Não'}</span>
-                      {editModal._shipping.dimensions && (<>
-                        <span className="text-gray-500 dark:text-gray-400">Dimensões:</span>
-                        <span className="text-gray-700 dark:text-gray-300">{editModal._shipping.dimensions}</span>
-                      </>)}
-                    </div>
-                  </div>
-                ) : (
-                  <p className="text-xs text-gray-400 italic">Nenhum dado de frete</p>
-                )}
-              </div>
-
-              {editModal.error_message && (
-                <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700 rounded-lg p-3 text-xs text-red-700 dark:text-red-400">
-                  <AlertTriangle className="w-4 h-4 inline mr-1" />
-                  <strong>Último erro:</strong> {editModal.error_message}
-                </div>
-              )}
-            </div>
-            <div className="flex justify-end gap-3 mt-6">
-              <button onClick={() => setEditModal(null)} className="px-4 py-2 border dark:border-gray-600 text-gray-700 dark:text-gray-300 rounded-lg text-sm hover:bg-gray-50 dark:hover:bg-gray-700">Cancelar</button>
-              <button onClick={handleSaveEdit} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium">Salvar Alterações</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Publish Modal (old templates) */}
-      {publishModal && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-md p-6">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-bold text-gray-900 dark:text-white">
-                Publicar {publishModal.templateIds ? `${publishModal.templateIds.length} template(s)` : 'Template'}
-              </h3>
-              <button onClick={() => setPublishModal(null)} className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700"><X className="w-5 h-5" /></button>
-            </div>
-            <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">Selecione a conta de destino onde os anúncios serão criados:</p>
-            <div className="space-y-2 mb-6">
-              {mlAccounts.map(acc => (
-                <button key={acc.id} onClick={() => setPublishModal(p => ({ ...p, targetAccountId: acc.id }))}
-                  className={`w-full text-left px-4 py-3 rounded-lg border-2 transition-all flex items-center justify-between ${
-                    publishModal.targetAccountId === acc.id
-                      ? 'border-green-500 bg-green-50 dark:bg-green-900/20'
-                      : 'border-gray-200 dark:border-gray-600 hover:border-blue-300'
-                  }`}>
-                  <div>
-                    <span className="font-medium text-gray-900 dark:text-white text-sm">{acc.name}</span>
-                    {acc.ml_user_id && <span className="text-xs text-gray-400 ml-2">ID: {acc.ml_user_id}</span>}
-                  </div>
-                  {publishModal.targetAccountId === acc.id && <CheckCircle className="w-5 h-5 text-green-500" />}
-                </button>
-              ))}
-            </div>
-            <div className="flex justify-end gap-3">
-              <button onClick={() => setPublishModal(null)} className="px-4 py-2 border dark:border-gray-600 text-gray-700 dark:text-gray-300 rounded-lg text-sm hover:bg-gray-50 dark:hover:bg-gray-700">Cancelar</button>
-              <button onClick={handlePublish} disabled={!publishModal.targetAccountId || publishing}
-                className="px-4 py-2 bg-green-600 hover:bg-green-700 disabled:bg-green-400 text-white rounded-lg text-sm font-medium flex items-center gap-2">
-                {publishing ? <><RefreshCw className="w-4 h-4 animate-spin" /> Publicando...</> : <><Send className="w-4 h-4" /> Publicar</>}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Modais legados de Templates (edit/publish) foram removidos junto com a consolidação em ad_models. */}
 
       {/* Model Edit Modal */}
       {modelEditModal && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-3 sm:p-4">
-          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-[min(96rem,98vw)] max-h-[92vh] overflow-y-auto p-5 sm:p-6">
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-[min(72rem,98vw)] max-h-[92vh] overflow-y-auto p-5 sm:p-6">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-bold text-gray-900 dark:text-white">{modelEditModal.id ? 'Editar Modelo' : 'Novo Modelo de Anúncio'}</h3>
               <button onClick={() => setModelEditModal(null)} className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700"><X className="w-5 h-5" /></button>
             </div>
             {SHOW_MODEL_MARKETPLACE_MAPPING_TAB && (
-            <div className="flex flex-wrap gap-1.5 mb-3 border-b border-gray-200 dark:border-gray-600">
-              <button
-                type="button"
-                onClick={() => setModelEditViewTab('detalhes')}
-                className={`px-3 py-2 text-sm font-medium rounded-t-lg border-b-2 -mb-px transition-colors ${
-                  modelEditViewTab === 'detalhes'
-                    ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}`}
-              >
-                Detalhes do anúncio
-              </button>
-              <button
-                type="button"
-                onClick={() => setModelEditViewTab('mapeamento')}
-                className={`px-3 py-2 text-sm font-medium rounded-t-lg border-b-2 -mb-px transition-colors inline-flex items-center gap-1.5 ${
-                  modelEditViewTab === 'mapeamento'
-                    ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}`}
-              >
-                <Globe className="w-4 h-4 shrink-0" /> Mapeamento multi-marketplace
-              </button>
-            </div>
+              <div className="flex flex-wrap gap-1.5 mb-3 border-b border-gray-200 dark:border-gray-600">
+                <button
+                  type="button"
+                  onClick={() => setModelEditViewTab('detalhes')}
+                  className={`px-3 py-2 text-sm font-medium rounded-t-lg border-b-2 -mb-px transition-colors ${
+                    modelEditViewTab === 'detalhes'
+                      ? 'border-blue-500 text-blue-600 dark:text-blue-400'
+                      : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}`}
+                  title="Informações compartilhadas: título, descrição, imagens, variações, preço e marca."
+                >
+                  Detalhes
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setModelEditViewTab('mercadolivre')}
+                  className={`px-3 py-2 text-sm font-medium rounded-t-lg border-b-2 -mb-px transition-colors inline-flex items-center gap-1.5 ${
+                    modelEditViewTab === 'mercadolivre'
+                      ? 'border-yellow-500 text-yellow-600 dark:text-yellow-400'
+                      : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}`}
+                  title="Informações exclusivas do Mercado Livre: categoria ML e ficha técnica ML."
+                >
+                  <img src="/mercado-livre.png" alt="" className="w-4 h-4 rounded-sm object-contain" /> Mercado Livre
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setModelEditViewTab('shopee')}
+                  className={`px-3 py-2 text-sm font-medium rounded-t-lg border-b-2 -mb-px transition-colors inline-flex items-center gap-1.5 ${
+                    modelEditViewTab === 'shopee'
+                      ? 'border-orange-500 text-orange-600 dark:text-orange-400'
+                      : 'border-transparent text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}`}
+                  title="Informações exclusivas da Shopee: categoria Shopee e ficha técnica Shopee."
+                >
+                  <img src="/shopee.png" alt="" className="w-4 h-4 rounded-sm object-contain" /> Shopee
+                </button>
+              </div>
             )}
             {(SHOW_MODEL_MARKETPLACE_MAPPING_TAB ? modelEditViewTab === 'detalhes' : true) && (
             <div className="space-y-4">
-              <div className="grid grid-cols-1 xl:grid-cols-12 gap-3 xl:gap-4 items-start">
-                <div className="xl:col-span-3 min-w-0">
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Categoria</label>
-                  <input type="text" value={modelEditModal.category_name || modelEditModal.category_id || ''} readOnly
-                    className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-gray-50 dark:bg-gray-700/50 text-gray-900 dark:text-white cursor-default" />
-                  {modelEditModal.category_id && (
-                    <span className="text-[10px] text-gray-400 mt-0.5 block font-mono truncate" title={modelEditModal.category_id}>{modelEditModal.category_id}</span>
-                  )}
+              {/* Bloco principal: texto + descrição — menos “ar livre” que campos soltos */}
+              <div className="rounded-xl border border-slate-200/90 dark:border-slate-600/80 bg-slate-50/70 dark:bg-slate-900/35 p-4 space-y-3">
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-start">
+                  <div className="lg:col-span-4 min-w-0">
+                    <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Categoria</label>
+                    <input type="text" value={modelEditModal.category_name || modelEditModal.category_id || '—'} readOnly
+                      className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white/80 dark:bg-gray-800/80 text-gray-900 dark:text-white cursor-default leading-snug" />
+                    {modelEditModal.category_id && (
+                      <details className="mt-1.5 group">
+                        <summary className="text-[11px] text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 cursor-pointer select-none list-inside">
+                          ID da categoria (técnico)
+                        </summary>
+                        <p className="text-[10px] font-mono text-gray-500 dark:text-gray-400 mt-1 pl-0.5 break-all">{modelEditModal.category_id}</p>
+                      </details>
+                    )}
+                  </div>
+                  <div className="lg:col-span-5 min-w-0">
+                    <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Título <span className="text-gray-400 font-normal">({modelEditModal.title?.length || 0}/60)</span></label>
+                    <input type="text" value={modelEditModal.title || ''} onChange={e => setModelEditModal(p => ({ ...p, title: e.target.value }))}
+                      className={`w-full px-3 py-2 border rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white ${modelEditModal.title?.length > 60 ? 'border-yellow-400 dark:border-yellow-500' : 'dark:border-gray-600'}`} />
+                  </div>
+                  <div className="lg:col-span-3 min-w-0">
+                    <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Condição</label>
+                    <select value={modelEditModal.condition || 'new'} onChange={e => setModelEditModal(p => ({ ...p, condition: e.target.value }))}
+                      className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white">
+                      <option value="new">Novo</option>
+                      <option value="used">Usado</option>
+                    </select>
+                  </div>
                 </div>
-                <div className="xl:col-span-6 min-w-0">
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Título ({modelEditModal.title?.length || 0}/60)</label>
-                  <input type="text" value={modelEditModal.title || ''} onChange={e => setModelEditModal(p => ({ ...p, title: e.target.value }))}
-                    className={`w-full px-3 py-2 border rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white ${modelEditModal.title?.length > 60 ? 'border-yellow-400 dark:border-yellow-500' : 'dark:border-gray-600'}`} />
-                </div>
-                <div className="xl:col-span-3 min-w-0">
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Condição</label>
-                  <select value={modelEditModal.condition || 'new'} onChange={e => setModelEditModal(p => ({ ...p, condition: e.target.value }))}
-                    className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white">
-                    <option value="new">Novo</option>
-                    <option value="used">Usado</option>
-                  </select>
+
+                {modelEditModal.title?.length > 60 && (
+                  <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-700 rounded-lg px-3 py-2 text-xs text-yellow-700 dark:text-yellow-400">
+                    <AlertTriangle className="w-4 h-4 inline mr-1 align-text-bottom" />
+                    O título será cortado para 60 caracteres na publicação.
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Descrição</label>
+                  <textarea rows={3} value={modelEditModal.description || ''} onChange={e => setModelEditModal(p => ({ ...p, description: e.target.value }))}
+                    placeholder="Texto que aparecerá no anúncio…"
+                    className="w-full min-h-[5.5rem] max-h-40 px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white resize-y leading-relaxed" />
                 </div>
               </div>
 
-              {modelEditModal.title?.length > 60 && (
-                <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-700 rounded-lg p-3 text-xs text-yellow-700 dark:text-yellow-400">
-                  <AlertTriangle className="w-4 h-4 inline mr-1" />
-                  Título tem {modelEditModal.title.length} caracteres. Será truncado para 60 na publicação.
-                </div>
-              )}
-
-              <div>
-                <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Descrição</label>
-                <textarea rows={4} value={modelEditModal.description || ''} onChange={e => setModelEditModal(p => ({ ...p, description: e.target.value }))}
-                  className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white resize-y" />
-              </div>
-
-              {/* Imagens */}
-              <div className="border border-gray-200 dark:border-gray-600 rounded-xl p-4 space-y-3 bg-gray-50/50 dark:bg-gray-900/20">
-                <div className="flex flex-wrap items-center gap-2">
-                  <Image className="w-4 h-4 text-blue-500 flex-shrink-0" />
-                  <span className="text-sm font-semibold text-gray-800 dark:text-gray-200">Imagens ({(modelEditModal._pictures || []).length})</span>
+              {/* Imagens — grelha compacta; URL editável sem ocupar sempre a linha inteira */}
+              <div className="border border-gray-200 dark:border-gray-600 rounded-xl p-3 sm:p-4 space-y-2 bg-gray-50/50 dark:bg-gray-900/20">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Image className="w-4 h-4 text-blue-500 flex-shrink-0" />
+                    <span className="text-sm font-semibold text-gray-800 dark:text-gray-200">Imagens ({(modelEditModal._pictures || []).length})</span>
+                  </div>
+                  <span className="text-[11px] text-gray-500 dark:text-gray-400 text-right sm:text-left max-w-[16rem] sm:max-w-none leading-snug">
+                    A primeira foto é a capa no ML · Arraste pela alça à esquerda para mudar a ordem
+                  </span>
                 </div>
                 <input ref={modelPictureFileInputRef} type="file" accept="image/jpeg,image/png,image/gif,image/webp" className="hidden" onChange={handleModelPictureFile} />
                 {(modelEditModal._pictures || []).length === 0 ? (
-                  <p className="text-xs text-gray-400 italic">Nenhuma imagem ainda. Adicione pelo menos uma antes de publicar.</p>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">Nenhuma imagem. Adicione pelo menos uma antes de publicar.</p>
                 ) : (
-                  <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-[min(260px,38vh)] overflow-y-auto pr-0.5">
                     {(modelEditModal._pictures || []).map((p, pi) => (
-                      <div key={String(p.id || p.source || pi)} className="flex items-start gap-2 p-2 rounded-lg bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700">
-                        <span className="text-[10px] text-gray-400 w-6 pt-1 text-right flex-shrink-0">{pi + 1}</span>
-                        <img src={p.source || p.secure_url} alt="" className="w-14 h-14 rounded object-cover bg-gray-100 dark:bg-gray-700 flex-shrink-0" onError={(e) => { e.target.style.opacity = 0.35; }} />
-                        <div className="flex-1 min-w-0">
-                          <label className="text-[10px] text-gray-500 dark:text-gray-400 block mb-0.5">Link da imagem</label>
-                          <input type="text" value={p.source || p.secure_url || ''} onChange={(e) => {
-                            const u = [...(modelEditModal._pictures || [])];
-                            u[pi] = { ...u[pi], source: e.target.value };
-                            setModelEditModal((prev) => ({ ...prev, _pictures: u }));
-                          }} className="w-full text-sm border border-gray-200 dark:border-gray-600 rounded px-2 py-1.5 bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
+                      <div
+                        key={String(p.id || p.source || pi)}
+                        className={`flex gap-2 p-2 rounded-lg bg-white dark:bg-gray-800 border transition-colors ${
+                          modelPictureDragOverIndex === pi
+                            ? 'border-blue-400 ring-2 ring-blue-400/35 bg-blue-50/60 dark:bg-blue-950/25 dark:border-blue-500'
+                            : 'border-gray-100 dark:border-gray-700'
+                        } ${modelPictureDraggingIndex === pi ? 'opacity-55' : ''}`}
+                        onDragOver={(e) => handleModelPictureDragOver(e, pi)}
+                        onDrop={(e) => handleModelPictureDrop(e, pi)}
+                        onDragLeave={handleModelPictureDragLeaveCard}
+                      >
+                        <div
+                          draggable
+                          onDragStart={(e) => handleModelPictureDragStart(e, pi)}
+                          onDragEnd={handleModelPictureDragEnd}
+                          className="flex items-center gap-1.5 flex-shrink-0 cursor-grab active:cursor-grabbing select-none rounded-lg p-1 -m-0.5 hover:bg-gray-100/90 dark:hover:bg-gray-700/80"
+                          title="Arrastar para reordenar"
+                        >
+                          <GripVertical className="w-4 h-4 text-gray-400 flex-shrink-0" aria-hidden />
+                          <span className="text-[10px] text-gray-500 w-4 text-center font-bold tabular-nums">{pi + 1}</span>
+                          <img
+                            src={p.source || p.secure_url}
+                            alt=""
+                            draggable={false}
+                            className="w-16 h-16 rounded-md object-cover bg-gray-100 dark:bg-gray-700 flex-shrink-0 border border-gray-100 dark:border-gray-600 pointer-events-none"
+                            onError={(e) => { e.target.style.opacity = 0.35; }}
+                          />
                         </div>
-                        <div className="flex flex-col gap-0.5 flex-shrink-0">
-                          <button type="button" disabled={pi === 0} onClick={() => {
-                            const u = [...(modelEditModal._pictures || [])];
-                            if (pi === 0) return;
-                            [u[pi - 1], u[pi]] = [u[pi], u[pi - 1]];
-                            setModelEditModal((prev) => ({ ...prev, _pictures: u }));
-                          }} className="p-1 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 rounded disabled:opacity-25" title="Subir"><ChevronUp className="w-4 h-4" /></button>
-                          <button type="button" disabled={pi >= (modelEditModal._pictures || []).length - 1} onClick={() => {
-                            const u = [...(modelEditModal._pictures || [])];
-                            if (pi >= u.length - 1) return;
-                            [u[pi], u[pi + 1]] = [u[pi + 1], u[pi]];
-                            setModelEditModal((prev) => ({ ...prev, _pictures: u }));
-                          }} className="p-1 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 rounded disabled:opacity-25" title="Descer"><ChevronDown className="w-4 h-4" /></button>
-                          <button type="button" onClick={() => {
-                            const pid = p.id;
-                            const pics = [...(modelEditModal._pictures || [])];
-                            pics.splice(pi, 1);
-                            const vars = (modelEditModal._variations || []).map((vv) => ({
-                              ...vv,
-                              picture_ids: (vv.picture_ids || []).filter((x) => String(x) !== String(pid)),
-                            }));
-                            setModelEditModal((prev) => ({ ...prev, _pictures: pics, _variations: vars }));
-                          }} className="p-1 text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 rounded" title="Remover"><Trash2 className="w-4 h-4" /></button>
+                        <div className="flex-1 min-w-0 flex flex-col gap-1">
+                          <details className="min-w-0">
+                            <summary className="text-[11px] text-blue-600 dark:text-blue-400 cursor-pointer hover:underline list-none [&::-webkit-details-marker]:hidden inline-flex items-center gap-1">
+                              <Link2 className="w-3 h-3 shrink-0 opacity-70" />
+                              Editar URL
+                            </summary>
+                            <p className="text-[10px] text-gray-400 truncate mt-1 mb-1" title={p.source || p.secure_url || ''}>{(p.source || p.secure_url || '').slice(0, 80)}{((p.source || p.secure_url || '').length > 80 ? '…' : '')}</p>
+                            <label className="sr-only">URL da imagem</label>
+                            <input
+                              type="text"
+                              value={p.source || p.secure_url || ''}
+                              onChange={(e) => {
+                                const u = [...(modelEditModal._pictures || [])];
+                                u[pi] = { ...u[pi], source: e.target.value };
+                                setModelEditModal((prev) => ({ ...prev, _pictures: u }));
+                              }}
+                              className="w-full mt-1 text-xs border border-gray-200 dark:border-gray-600 rounded px-2 py-1.5 bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                              placeholder="https://…"
+                            />
+                          </details>
+                          <div className="flex justify-end pt-0.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const pid = p.id;
+                                const pics = [...(modelEditModal._pictures || [])];
+                                pics.splice(pi, 1);
+                                const vars = (modelEditModal._variations || []).map((vv) => ({
+                                  ...vv,
+                                  picture_ids: (vv.picture_ids || []).filter((x) => String(x) !== String(pid)),
+                                }));
+                                setModelEditModal((prev) => ({ ...prev, _pictures: pics, _variations: vars }));
+                              }}
+                              className="p-1.5 text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 rounded"
+                              title="Remover imagem"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
                         </div>
                       </div>
                     ))}
@@ -2496,6 +4357,11 @@ export const Anuncios = ({ user }) => {
                     className="px-4 py-2 border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-800 dark:text-gray-200 rounded-lg text-sm font-medium whitespace-nowrap flex items-center justify-center gap-2 disabled:opacity-50">
                     {modelPicUploading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
                     Enviar arquivo
+                  </button>
+                  <button type="button" onClick={openMediaLibrary}
+                    className="px-4 py-2 border border-purple-300 dark:border-purple-700 bg-purple-50 dark:bg-purple-950/40 text-purple-800 dark:text-purple-200 rounded-lg text-sm font-medium whitespace-nowrap flex items-center justify-center gap-2 hover:bg-purple-100 dark:hover:bg-purple-900/60"
+                    title="Reaproveitar fotos de outros modelos">
+                    <Image className="w-4 h-4" /> Biblioteca
                   </button>
                 </div>
                 {modelShowPicUrlInput && (
@@ -2525,17 +4391,33 @@ export const Anuncios = ({ user }) => {
               </div>
 
               {modelEditModal.category_id && (
-                <div className="space-y-3">
-                  <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2">
-                    <div>
-                      <label className="block text-sm font-semibold text-gray-800 dark:text-gray-200">Ficha técnica — Atributos do item ({(modelEditModal._attributes || []).length})</label>
-                      <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">
-                        Campos obrigatórios da categoria ML (<span className="font-mono">{modelEditModal.category_id}</span>) são adicionados automaticamente quando faltam (ex.: <span className="font-mono">MATERIALS</span>, <span className="font-mono">INCLUDES_BULBS</span>). Preencha o valor em cada cartão. Atributos de <strong className="font-medium text-gray-600 dark:text-gray-300">variação</strong> (cor, voltagem, etc.) ficam na secção <strong className="font-medium text-gray-600 dark:text-gray-300">Variações</strong>.
-                      </p>
+                <div className="space-y-2.5 rounded-xl border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800/50 p-3 sm:p-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                      <label className="text-sm font-semibold text-gray-800 dark:text-gray-200">
+                        Ficha técnica <span className="font-normal text-gray-500 dark:text-gray-400">({(modelEditModal._attributes || []).length} campos)</span>
+                      </label>
+                      <label className="inline-flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-400 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          className="rounded border-gray-300 dark:border-gray-500 text-blue-600 focus:ring-blue-500"
+                          checked={modelShowTechnicalIds}
+                          onChange={(e) => setModelShowTechnicalIds(e.target.checked)}
+                        />
+                        Mostrar códigos ML
+                      </label>
+                      <details className="text-xs">
+                        <summary className="cursor-pointer text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 inline-flex items-center gap-1 list-none [&::-webkit-details-marker]:hidden">
+                          <Info className="w-3.5 h-3.5" /> Ajuda
+                        </summary>
+                        <p className="mt-2 text-[11px] text-gray-500 dark:text-gray-400 leading-snug max-w-xl border-t border-gray-100 dark:border-gray-700 pt-2">
+                          Os campos obrigatórios do Mercado Livre para esta categoria aparecem destacados. Cor, voltagem e similares editam-se em <strong className="font-medium text-gray-600 dark:text-gray-300">Variações</strong>, não aqui.
+                        </p>
+                      </details>
                     </div>
                     {modelCategorySchemaLoading && (
-                      <span className="text-xs text-blue-600 dark:text-blue-400 flex items-center gap-1.5">
-                        <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Carregando regras do ML…
+                      <span className="text-xs text-blue-600 dark:text-blue-400 flex items-center gap-1.5 shrink-0">
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" /> A carregar regras…
                       </span>
                     )}
                   </div>
@@ -2561,7 +4443,7 @@ export const Anuncios = ({ user }) => {
                       type="search"
                       value={modelAttrSearch}
                       onChange={e => setModelAttrSearch(e.target.value)}
-                      placeholder="Buscar por nome ou ID…"
+                      placeholder="Buscar atributo…"
                       className="flex-1 min-w-0 px-3 py-2 text-sm border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
                     />
                     <div className="flex rounded-lg border border-gray-200 dark:border-gray-600 overflow-hidden text-xs font-medium">
@@ -2582,7 +4464,7 @@ export const Anuncios = ({ user }) => {
                     </div>
                   </div>
 
-                  <div className="border border-gray-200 dark:border-gray-600 rounded-xl max-h-[min(36rem,62vh)] overflow-y-auto p-2 bg-gray-50/50 dark:bg-gray-900/20">
+                  <div className="border border-gray-200 dark:border-gray-600 rounded-lg max-h-[min(32rem,52vh)] overflow-y-auto p-2 bg-gray-50/50 dark:bg-gray-900/20">
                     {modelCategorySchemaLoading && (modelEditModal._attributes || []).length === 0 ? (
                       <div className="text-sm text-gray-500 text-center py-8 px-2 flex items-center justify-center gap-2">
                         <RefreshCw className="w-4 h-4 animate-spin text-blue-500" />
@@ -2597,7 +4479,7 @@ export const Anuncios = ({ user }) => {
                           </p>
                         ) : modelAttrSearch.trim() && /frequ|rota|rpm/i.test(modelAttrSearch) ? (
                           <p className="text-xs text-gray-600 dark:text-gray-400 text-left max-w-lg mx-auto">
-                            Rotação em rpm costuma ser <strong className="font-medium">Velocidade máxima de rotação</strong> (<span className="font-mono">MAX_ROTATION_SPEED</span>) nesta lista, ou um eixo na secção Variações. «Frequência» no ML (Hz) é outro campo (<span className="font-mono">FREQUENCY</span>).
+                            Rotação (rpm) costuma aparecer como <strong className="font-medium">velocidade máxima de rotação</strong> na lista{modelShowTechnicalIds && <> (<span className="font-mono">MAX_ROTATION_SPEED</span>)</>} ou na secção Variações.{modelShowTechnicalIds && <> «Frequência» (Hz) é outro campo (<span className="font-mono">FREQUENCY</span>).</>}
                           </p>
                         ) : null}
                       </div>
@@ -2635,17 +4517,19 @@ export const Anuncios = ({ user }) => {
                             >
                               <div className="flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5 mb-1">
                                 <span className="text-xs font-semibold text-gray-900 dark:text-white leading-tight break-words">{r.displayName}</span>
-                                <span className="text-[9px] font-mono text-gray-400 dark:text-gray-500 shrink-0">{r.attr.id}</span>
+                                {modelShowTechnicalIds && (
+                                  <span className="text-[9px] font-mono text-gray-400 dark:text-gray-500 shrink-0">{r.attr.id}</span>
+                                )}
                               </div>
                               {r.def?.hint ? (
-                                <p className="text-[10px] text-gray-500 dark:text-gray-400 mb-1.5 leading-snug">{r.def.hint}</p>
+                                <p className="text-[10px] text-gray-500 dark:text-gray-400 mb-1.5 leading-snug line-clamp-2" title={r.def.hint}>{r.def.hint}</p>
                               ) : null}
                               <div className="flex flex-wrap gap-1 mb-1.5">
                                 {r.ignored && (
                                   <span className="text-[9px] font-medium px-1 py-0.5 rounded bg-gray-200 dark:bg-gray-600 text-gray-600 dark:text-gray-300">Ignorado</span>
                                 )}
                                 {!r.ignored && r.required && (
-                                  <span className="text-[9px] font-bold px-1 py-0.5 rounded bg-red-100 text-red-800 dark:bg-red-900/50 dark:text-red-200">Obrig. ML</span>
+                                  <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded bg-red-100 text-red-800 dark:bg-red-900/50 dark:text-red-200">Obrigatório</span>
                                 )}
                                 {!r.ignored && !r.required && r.catalogRequired && (
                                   <span className="text-[9px] font-semibold px-1 py-0.5 rounded bg-violet-100 text-violet-800 dark:bg-violet-900/40 dark:text-violet-200">Catálogo</span>
@@ -2689,13 +4573,18 @@ export const Anuncios = ({ user }) => {
                                   className={`w-full min-w-0 px-2 py-1.5 rounded-md text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white ${inputBorder}`}
                                 />
                               )}
-                              <div className="mt-1 text-[9px] text-gray-500 dark:text-gray-400 flex flex-wrap justify-between gap-x-2 gap-y-0">
+                              <div className="mt-1 text-[9px] text-gray-500 dark:text-gray-400 flex flex-wrap justify-between gap-x-2 gap-y-0 min-h-[1rem]">
                                 <span className="tabular-nums">
-                                  {hasList ? (
+                                  {!modelShowTechnicalIds ? (
+                                    <>
+                                      {!hasList && typeof maxLen === 'number' && maxLen > 0 ? `${val.length}/${maxLen}` : null}
+                                      {hasList ? <span className="text-gray-400">Lista fechada</span> : null}
+                                    </>
+                                  ) : hasList ? (
                                     <span className="font-mono">lista ML</span>
                                   ) : (
                                     <>
-                                      {typeof maxLen === 'number' && maxLen > 0 ? `${val.length}/${maxLen}` : val.length}
+                                      {typeof maxLen === 'number' && maxLen > 0 ? `${val.length}/${maxLen}` : val.length > 0 ? `${val.length} caracteres` : null}
                                       {r.def?.value_type ? (
                                         <span className="text-gray-400 dark:text-gray-500"> · <span className="font-mono">{r.def.value_type}</span></span>
                                       ) : null}
@@ -2898,6 +4787,7 @@ export const Anuncios = ({ user }) => {
                   <div className="text-xs text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-900/30 rounded-lg px-3 py-2">
                     Modelo sem variações (um único SKU).
                     <button type="button" onClick={() => {
+                      setVariationPickerRequested(true);
                       setModelVariationAxisChoice(null);
                       setModelEditModal((p) => ({ ...p, _variations: [] }));
                     }} className="ml-2 text-blue-600 dark:text-blue-400 font-medium hover:underline">Alterar</button>
@@ -3062,51 +4952,102 @@ export const Anuncios = ({ user }) => {
                         className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
                     </div>
                   </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
+                      Vincular ao estoque
+                      <span className="ml-1 text-gray-400 font-normal">(sincroniza saldo com o inventário)</span>
+                    </label>
+                    <InventoryAutocomplete
+                      value={modelEditModal.inventory_id || null}
+                      onChange={(id) => setModelEditModal((p) => ({ ...p, inventory_id: id }))}
+                      placeholder="Buscar item do estoque por SKU, título ou EAN…"
+                    />
+                  </div>
                 </div>
               )}
             </div>
             )}
 
-            {SHOW_MODEL_MARKETPLACE_MAPPING_TAB && modelEditViewTab === 'mapeamento' && modelEditModal && (() => {
+            {SHOW_MODEL_MARKETPLACE_MAPPING_TAB && modelEditViewTab === 'mercadolivre' && modelEditModal && (() => {
               const mm = parseMarketplaceMappings(modelEditModal._marketplace_mappings);
               const ch = mm.channels;
+              const updateChannel = (channelKey, patch) => {
+                setModelEditModal((p) => {
+                  const m = parseMarketplaceMappings(p._marketplace_mappings);
+                  return {
+                    ...p,
+                    _marketplace_mappings: {
+                      ...m,
+                      channels: { ...m.channels, [channelKey]: { ...m.channels[channelKey], ...patch } },
+                    },
+                  };
+                });
+              };
+              const updateShared = (patch) => {
+                setModelEditModal((p) => {
+                  const m = parseMarketplaceMappings(p._marketplace_mappings);
+                  return {
+                    ...p,
+                    _marketplace_mappings: { ...m, canonical: { ...m.canonical, ...patch } },
+                  };
+                });
+              };
               return (
                 <div className="space-y-5 max-h-[min(70vh,840px)] overflow-y-auto pr-1 text-sm">
-                  <div className="rounded-xl border border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-950/20 p-4 text-xs text-gray-700 dark:text-gray-300 leading-relaxed">
-                    <p className="font-semibold text-gray-900 dark:text-white mb-1.5">Núcleo canónico e canais</p>
-                    <p>
-                      Guarde aqui equivalências entre marketplaces. O Mercado Livre continua a usar a categoria e a ficha técnica na aba <strong className="font-medium">Detalhes do anúncio</strong>.
-                      Shopee, Amazon e Leroy Merlin exigem IDs e listas próprios — estes campos alimentam futuras publicações e integrações por canal.
+                  {/* Aba Mercado Livre: explicação curta, sem misturar com Shopee. */}
+                  <div className="rounded-xl border border-yellow-200 dark:border-yellow-800 bg-yellow-50/60 dark:bg-yellow-950/25 p-4 text-xs text-gray-700 dark:text-gray-300 leading-relaxed">
+                    <p className="font-semibold text-gray-900 dark:text-white mb-1.5 flex items-center gap-1.5">
+                      <img src="/mercado-livre.png" alt="" className="w-4 h-4 rounded-sm object-contain" /> Informações exclusivas do Mercado Livre
+                    </p>
+                    <p className="mb-0">
+                      A categoria ML e a ficha técnica ML continuam na aba <strong>Detalhes</strong> (são usadas também para definir variações do modelo). Aqui ficam apenas informações compartilhadas (marca, modelo, etc.), notas internas e a validação do payload ML.
                     </p>
                   </div>
+                  {/* Resumo da categoria ML + notas internas */}
+                  <div className="rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50/40 dark:bg-amber-950/20 p-4 space-y-2">
+                    <div className="flex items-center gap-2">
+                      <img src="/mercado-livre.png" alt="" className="w-6 h-6 rounded-sm object-contain" />
+                      <span className="font-semibold text-gray-900 dark:text-white">Categoria do Mercado Livre</span>
+                    </div>
+                    <div className="text-xs">
+                      <span className="text-gray-500 dark:text-gray-400">Categoria: </span>
+                      <span className="font-mono text-gray-700 dark:text-gray-200">{modelEditModal.category_id || '— não definida —'}</span>
+                      {modelEditModal.category_name && <span className="ml-1 text-gray-600 dark:text-gray-300">({modelEditModal.category_name})</span>}
+                    </div>
+                    <p className="text-[11px] text-amber-700 dark:text-amber-300">
+                      Para alterar a categoria ou preencher a ficha técnica ML, volte à aba <strong>Detalhes</strong>.
+                    </p>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mt-2">Observações internas (Mercado Livre)</label>
+                      <textarea rows={2}
+                        value={ch.mercadolivre.notes || ''}
+                        onChange={(e) => updateChannel('mercadolivre', { notes: e.target.value })}
+                        className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+                        placeholder="Anote aqui informações só para a sua equipe (não são enviadas ao ML)" />
+                    </div>
+                  </div>
 
+                  {/* Informações compartilhadas — usadas também por outros canais */}
                   <div className="rounded-xl border border-gray-200 dark:border-gray-600 p-4 space-y-3 bg-white dark:bg-gray-800/50">
-                    <h4 className="font-semibold text-gray-900 dark:text-white">Núcleo canónico</h4>
+                    <div className="flex items-center gap-2 mb-1">
+                      <Globe className="w-4 h-4 text-gray-500" />
+                      <h4 className="font-semibold text-gray-900 dark:text-white">Informações compartilhadas entre canais</h4>
+                    </div>
+                    <p className="text-[11px] text-gray-500 dark:text-gray-400 -mt-1.5">Valores que valem para qualquer marketplace. Preencha uma vez e serão reaproveitados nas publicações.</p>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       {[
-                        { key: 'brand', label: 'Campo canónico 1' },
-                        { key: 'model_name', label: 'Campo canónico 2' },
-                        { key: 'material', label: 'Campo canónico 3' },
-                        { key: 'color', label: 'Campo canónico 4' },
-                      ].map(({ key, label }) => (
+                        { key: 'brand', label: 'Marca', placeholder: 'ex.: Lumi' },
+                        { key: 'model_name', label: 'Nome do modelo', placeholder: 'ex.: Trilho Spot Completo' },
+                        { key: 'material', label: 'Material principal', placeholder: 'ex.: Alumínio' },
+                        { key: 'color', label: 'Cor principal', placeholder: 'ex.: Preto' },
+                      ].map(({ key, label, placeholder }) => (
                         <div key={key}>
                           <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">{label}</label>
                           <input
                             type="text"
                             value={mm.canonical[key] || ''}
-                            onChange={(e) => {
-                              const v = e.target.value;
-                              setModelEditModal((p) => {
-                                const m = parseMarketplaceMappings(p._marketplace_mappings);
-                                return {
-                                  ...p,
-                                  _marketplace_mappings: {
-                                    ...m,
-                                    canonical: { ...m.canonical, [key]: v },
-                                  },
-                                };
-                              });
-                            }}
+                            placeholder={placeholder}
+                            onChange={(e) => updateShared({ [key]: e.target.value })}
                             className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
                           />
                         </div>
@@ -3114,311 +5055,253 @@ export const Anuncios = ({ user }) => {
                     </div>
                   </div>
 
-                  <div className="overflow-x-auto rounded-xl border border-gray-200 dark:border-gray-600">
-                    <table className="min-w-full text-xs">
-                      <thead>
-                        <tr className="bg-gray-50 dark:bg-gray-900/50 border-b border-gray-200 dark:border-gray-600">
-                          <th className="text-left px-3 py-2 font-semibold text-gray-800 dark:text-gray-200">Conceito</th>
-                          <th className="text-left px-3 py-2 font-semibold text-gray-800 dark:text-gray-200">Mercado Livre</th>
-                          <th className="text-left px-3 py-2 font-semibold text-gray-800 dark:text-gray-200">Shopee</th>
-                          <th className="text-left px-3 py-2 font-semibold text-gray-800 dark:text-gray-200">Amazon (SP-API)</th>
-                          <th className="text-left px-3 py-2 font-semibold text-gray-800 dark:text-gray-200">Leroy Merlin</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
-                        <tr>
-                          <td className="px-3 py-2 text-gray-700 dark:text-gray-300">Atributos de catálogo</td>
-                          <td className="px-3 py-2 font-mono text-[11px] text-gray-600 dark:text-gray-400">Por categoria (API)</td>
-                          <td className="px-3 py-2 text-gray-600 dark:text-gray-400">Por categoria (API)</td>
-                          <td className="px-3 py-2 text-gray-600 dark:text-gray-400">Por product type</td>
-                          <td className="px-3 py-2 text-gray-600 dark:text-gray-400">Conforme integração</td>
-                        </tr>
-                        <tr>
-                          <td className="px-3 py-2 text-gray-700 dark:text-gray-300">Categoria</td>
-                          <td className="px-3 py-2 font-mono text-[11px] text-gray-600 dark:text-gray-400">category_id (MLB…)</td>
-                          <td className="px-3 py-2 text-gray-600 dark:text-gray-400">category_id (árvore Shopee)</td>
-                          <td className="px-3 py-2 text-gray-600 dark:text-gray-400">product_type + browse</td>
-                          <td className="px-3 py-2 text-gray-600 dark:text-gray-400">Categoria interna LM</td>
-                        </tr>
-                        <tr>
-                          <td className="px-3 py-2 text-gray-700 dark:text-gray-300">Código de barras</td>
-                          <td className="px-3 py-2 font-mono text-[11px] text-gray-600 dark:text-gray-400">GTIN / EAN</td>
-                          <td className="px-3 py-2 text-gray-600 dark:text-gray-400">EAN no item</td>
-                          <td className="px-3 py-2 text-gray-600 dark:text-gray-400">externally_assigned_product_identifier</td>
-                          <td className="px-3 py-2 text-gray-600 dark:text-gray-400">EAN 13 típico</td>
-                        </tr>
-                      </tbody>
-                    </table>
-                  </div>
+                  {/* Amazon/Leroy Merlin — seção recolhida, fora do escopo atual */}
+                  <details className="rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/30">
+                    <summary className="cursor-pointer px-4 py-3 text-xs font-medium text-gray-600 dark:text-gray-300 flex items-center gap-2">
+                      <ChevronRight className="w-3.5 h-3.5" /> Outros marketplaces (Amazon / Leroy Merlin) — integração futura
+                    </summary>
+                    <div className="px-4 pb-4 pt-1 text-xs text-gray-500 dark:text-gray-400 space-y-3">
+                      <p>Estas integrações ainda não publicam automaticamente. Os campos aqui são apenas para referência interna.</p>
 
-                  <div className="rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50/40 dark:bg-amber-950/20 p-4 space-y-2">
-                    <div className="flex items-center gap-2">
-                      <img src="/mercado-livre.png" alt="" className="w-6 h-6 rounded-sm object-contain" />
-                      <span className="font-semibold text-gray-900 dark:text-white">Mercado Livre</span>
+                      <div className="rounded-lg border border-gray-200 dark:border-gray-600 p-3 space-y-2 bg-white dark:bg-gray-800/40">
+                        <div className="flex items-center gap-2">
+                          <img src="/amazon.png" alt="" className="w-5 h-5 rounded-sm object-contain" />
+                          <span className="font-semibold text-gray-800 dark:text-gray-100 text-sm">Amazon</span>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <input type="text" value={ch.amazon.product_type || ''}
+                            onChange={(e) => updateChannel('amazon', { product_type: e.target.value })}
+                            placeholder="Product type (ex.: LAMP)"
+                            className="w-full px-2 py-1.5 border dark:border-gray-600 rounded text-xs bg-white dark:bg-gray-700 font-mono text-gray-900 dark:text-white" />
+                          <input type="text" value={ch.amazon.browse_node || ''}
+                            onChange={(e) => updateChannel('amazon', { browse_node: e.target.value })}
+                            placeholder="Browse node"
+                            className="w-full px-2 py-1.5 border dark:border-gray-600 rounded text-xs bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
+                        </div>
+                        <textarea rows={2} value={ch.amazon.notes || ''}
+                          onChange={(e) => updateChannel('amazon', { notes: e.target.value })}
+                          placeholder="Notas Amazon"
+                          className="w-full px-2 py-1.5 border dark:border-gray-600 rounded text-xs bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
+                      </div>
+
+                      <div className="rounded-lg border border-gray-200 dark:border-gray-600 p-3 space-y-2 bg-white dark:bg-gray-800/40">
+                        <div className="flex items-center gap-2">
+                          <img src="/leroy-merlin.png" alt="" className="w-5 h-5 rounded-sm object-contain" />
+                          <span className="font-semibold text-gray-800 dark:text-gray-100 text-sm">Leroy Merlin</span>
+                        </div>
+                        <input type="text" value={ch.leroy_merlin?.category_id || ''}
+                          onChange={(e) => updateChannel('leroy_merlin', { category_id: e.target.value })}
+                          placeholder="Categoria interna LM"
+                          className="w-full px-2 py-1.5 border dark:border-gray-600 rounded text-xs bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
+                        <textarea rows={2} value={ch.leroy_merlin?.notes || ''}
+                          onChange={(e) => updateChannel('leroy_merlin', { notes: e.target.value })}
+                          placeholder="Notas Leroy Merlin"
+                          className="w-full px-2 py-1.5 border dark:border-gray-600 rounded text-xs bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
+                      </div>
                     </div>
-                    <p className="text-xs text-gray-600 dark:text-gray-400">
-                      Categoria: <span className="font-mono">{modelEditModal.category_id || '—'}</span>
-                      {modelEditModal.category_name && <span className="ml-1">({modelEditModal.category_name})</span>}
+                  </details>
+
+                  {/* Validação para publicação no Mercado Livre */}
+                  <div className="rounded-xl border border-indigo-200 dark:border-indigo-800 bg-indigo-50/40 dark:bg-indigo-950/15 p-4 space-y-3">
+                    <div className="flex items-center gap-2">
+                      <CheckCircle className="w-5 h-5 text-indigo-500" />
+                      <span className="font-semibold text-gray-900 dark:text-white">Validação Mercado Livre</span>
+                    </div>
+                    <p className="text-xs text-gray-600 dark:text-gray-400">Dispara uma verificação local + no backend antes de publicar no Mercado Livre. Identifica campos vazios, atributos obrigatórios do ML e outros problemas.</p>
+                    <div className="flex flex-wrap gap-2">
+                      <button type="button" disabled={modelValidationLoading || !modelEditModal.id}
+                        onClick={() => runModelValidation('ml')}
+                        className="px-3 py-1.5 text-xs font-medium rounded-lg bg-yellow-100 dark:bg-yellow-900/40 text-yellow-800 dark:text-yellow-200 hover:bg-yellow-200 dark:hover:bg-yellow-900/60 disabled:opacity-50 inline-flex items-center gap-1.5">
+                        {modelValidationLoading ? <RefreshCw className="w-3 h-3 animate-spin" /> : <img src="/mercado-livre.png" alt="" className="w-3.5 h-3.5" />}
+                        Validar para Mercado Livre
+                      </button>
+                      {!modelEditModal.id && (
+                        <span className="text-[11px] text-gray-500 italic self-center">Salve o modelo primeiro para validar.</span>
+                      )}
+                    </div>
+                    {modelValidationResult && modelValidationResult.marketplace === 'ml' && (
+                      <div className={`rounded-lg border p-3 text-xs ${modelValidationResult.ok ? 'border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/30' : 'border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/30'}`}>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="font-semibold text-gray-900 dark:text-white uppercase tracking-wide">
+                            Mercado Livre — {modelValidationResult.ok ? 'Pronto para publicar' : 'Precisa ajustes'}
+                          </span>
+                          <button type="button" onClick={() => setModelValidationResult(null)} className="p-0.5 rounded hover:bg-black/5 dark:hover:bg-white/10">
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                        {(modelValidationResult.issues || []).length > 0 && (
+                          <div>
+                            <p className="text-red-700 dark:text-red-300 font-medium mb-1">Pendências:</p>
+                            <ul className="list-disc pl-5 space-y-0.5 text-red-700 dark:text-red-300">
+                              {modelValidationResult.issues.map((it, i) => (
+                                <li key={i}><span className="font-mono text-[10px] opacity-70">[{it.code}]</span> {it.message}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                        {(modelValidationResult.warnings || []).length > 0 && (
+                          <div className="mt-2">
+                            <p className="text-amber-700 dark:text-amber-300 font-medium mb-1">Alertas:</p>
+                            <ul className="list-disc pl-5 space-y-0.5 text-amber-700 dark:text-amber-300">
+                              {modelValidationResult.warnings.map((it, i) => (
+                                <li key={i}><span className="font-mono text-[10px] opacity-70">[{it.code}]</span> {it.message}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {SHOW_MODEL_MARKETPLACE_MAPPING_TAB && modelEditViewTab === 'shopee' && modelEditModal && (() => {
+              const mm = parseMarketplaceMappings(modelEditModal._marketplace_mappings);
+              const shopeeCh = mm.channels.shopee;
+              const updateShopeeChannel = (patch) => {
+                setModelEditModal((p) => {
+                  const m = parseMarketplaceMappings(p._marketplace_mappings);
+                  return {
+                    ...p,
+                    _marketplace_mappings: {
+                      ...m,
+                      channels: { ...m.channels, shopee: { ...m.channels.shopee, ...patch } },
+                    },
+                  };
+                });
+              };
+              const updateShopeeAttrs = (attrs) => updateShopeeChannel({ attributes: attrs });
+              return (
+                <div className="space-y-4 max-h-[min(70vh,840px)] overflow-y-auto pr-1 text-sm">
+                  {/* Intro — explica o papel da aba e distingue das demais */}
+                  <div className="rounded-xl border border-orange-200 dark:border-orange-800 bg-orange-50/60 dark:bg-orange-950/25 p-4 text-xs text-gray-700 dark:text-gray-300 leading-relaxed">
+                    <p className="font-semibold text-gray-900 dark:text-white mb-1.5 flex items-center gap-1.5">
+                      <img src="/shopee.png" alt="" className="w-4 h-4 rounded-sm object-contain" /> Informações exclusivas da Shopee
                     </p>
-                    <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mt-2">Notas internas (ML)</label>
-                    <textarea
-                      rows={2}
-                      value={ch.mercadolivre.notes || ''}
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        setModelEditModal((p) => {
-                          const m = parseMarketplaceMappings(p._marketplace_mappings);
-                          return {
-                            ...p,
-                            _marketplace_mappings: {
-                              ...m,
-                              channels: { ...m.channels, mercadolivre: { ...m.channels.mercadolivre, notes: v } },
-                            },
-                          };
-                        });
-                      }}
+                    <p className="mb-0">
+                      Cada categoria da Shopee tem seu próprio código e seus próprios atributos obrigatórios, que <strong>não são os mesmos</strong> do Mercado Livre. Aqui você define a categoria Shopee, preenche a ficha técnica Shopee (com importação automática de value_ids) e valida antes de publicar.
+                    </p>
+                  </div>
+
+                  {/* Passo 1: categoria Shopee + autocomplete + hint baseado na cat ML */}
+                  <ShopeeMappingBlock
+                    channel={shopeeCh}
+                    mlCategoryName={modelEditModal.category_name}
+                    mlCategoryId={modelEditModal.category_id}
+                    shopeeAccounts={shopeeAccounts}
+                    onChange={updateShopeeChannel}
+                  />
+
+                  {/* Passo 2: ficha técnica Shopee — só faz sentido depois de ter categoria */}
+                  {shopeeCh.category_id ? (
+                    <>
+                      <div className="rounded-lg border border-orange-200 dark:border-orange-800 bg-orange-50/40 dark:bg-orange-950/20 px-3 py-2 text-[11px] text-gray-600 dark:text-gray-400">
+                        Categoria Shopee selecionada: <span className="font-mono text-gray-800 dark:text-gray-200">{shopeeCh.category_id}</span>
+                        {shopeeCh.category_name && <> — {shopeeCh.category_name}</>}
+                      </div>
+                      <ShopeeAttributesBlock
+                        accountId={shopeeAccounts[0]?.id || ''}
+                        categoryId={shopeeCh.category_id}
+                        value={shopeeCh.attributes || {}}
+                        onChange={updateShopeeAttrs}
+                        autoOpenImport={!!modelEditModal?._openShopeeImport}
+                      />
+                    </>
+                  ) : (
+                    <div className="rounded-xl border border-dashed border-orange-300 dark:border-orange-700 bg-orange-50/30 dark:bg-orange-950/10 p-4 text-xs text-gray-500 dark:text-gray-400">
+                      Defina a <strong>categoria Shopee</strong> acima para carregar a ficha técnica (atributos obrigatórios, dropdowns com value_ids oficiais etc.).
+                    </div>
+                  )}
+
+                  {/* Notas internas Shopee */}
+                  <div className="rounded-xl border border-gray-200 dark:border-gray-600 bg-white dark:bg-gray-800/50 p-4 space-y-2">
+                    <label className="block text-xs font-medium text-gray-600 dark:text-gray-400">Observações internas (Shopee)</label>
+                    <textarea rows={2}
+                      value={shopeeCh.notes || ''}
+                      onChange={(e) => updateShopeeChannel({ notes: e.target.value })}
                       className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                      placeholder="Observações só para a sua equipa…"
-                    />
+                      placeholder="Notas de operação Shopee (não são enviadas para a Shopee)." />
                   </div>
 
-                  <div className="rounded-xl border border-orange-200 dark:border-orange-800 bg-orange-50/30 dark:bg-orange-950/15 p-4 space-y-3">
+                  {/* Validação Shopee */}
+                  <div className="rounded-xl border border-orange-200 dark:border-orange-800 bg-orange-50/40 dark:bg-orange-950/15 p-4 space-y-3">
                     <div className="flex items-center gap-2">
-                      <img src="/shopee.png" alt="" className="w-6 h-6 rounded-sm object-contain" />
-                      <span className="font-semibold text-gray-900 dark:text-white">Shopee</span>
+                      <CheckCircle className="w-5 h-5 text-orange-500" />
+                      <span className="font-semibold text-gray-900 dark:text-white">Validação Shopee</span>
                     </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      <div>
-                        <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Categoria (ID Shopee)</label>
-                        <input
-                          type="text"
-                          value={ch.shopee.category_id || ''}
-                          onChange={(e) => {
-                            const v = e.target.value;
-                            setModelEditModal((p) => {
-                              const m = parseMarketplaceMappings(p._marketplace_mappings);
-                              return {
-                                ...p,
-                                _marketplace_mappings: {
-                                  ...m,
-                                  channels: { ...m.channels, shopee: { ...m.channels.shopee, category_id: v } },
-                                },
-                              };
-                            });
-                          }}
-                          className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 font-mono text-gray-900 dark:text-white"
-                          placeholder="ex.: 100053"
-                        />
+                    <p className="text-xs text-gray-600 dark:text-gray-400">Verifica categoria, atributos obrigatórios, value_ids e payload antes de publicar na Shopee.</p>
+                    <div className="flex flex-wrap gap-2">
+                      <button type="button" disabled={modelValidationLoading || !modelEditModal.id}
+                        onClick={() => runModelValidation('shopee')}
+                        className="px-3 py-1.5 text-xs font-medium rounded-lg bg-orange-100 dark:bg-orange-900/40 text-orange-800 dark:text-orange-200 hover:bg-orange-200 dark:hover:bg-orange-900/60 disabled:opacity-50 inline-flex items-center gap-1.5">
+                        {modelValidationLoading ? <RefreshCw className="w-3 h-3 animate-spin" /> : <img src="/shopee.png" alt="" className="w-3.5 h-3.5" />}
+                        Validar para Shopee
+                      </button>
+                      {!modelEditModal.id && (
+                        <span className="text-[11px] text-gray-500 italic self-center">Salve o modelo primeiro para validar.</span>
+                      )}
+                    </div>
+                    {modelValidationResult && modelValidationResult.marketplace === 'shopee' && (
+                      <div className={`rounded-lg border p-3 text-xs ${modelValidationResult.ok ? 'border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/30' : 'border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-950/30'}`}>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="font-semibold text-gray-900 dark:text-white uppercase tracking-wide">
+                            Shopee — {modelValidationResult.ok ? 'Pronto para publicar' : 'Precisa ajustes'}
+                          </span>
+                          <button type="button" onClick={() => setModelValidationResult(null)} className="p-0.5 rounded hover:bg-black/5 dark:hover:bg-white/10">
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                        {(modelValidationResult.issues || []).length > 0 && (
+                          <div>
+                            <p className="text-red-700 dark:text-red-300 font-medium mb-1">Pendências:</p>
+                            <ul className="list-disc pl-5 space-y-0.5 text-red-700 dark:text-red-300">
+                              {modelValidationResult.issues.map((it, i) => (
+                                <li key={i}><span className="font-mono text-[10px] opacity-70">[{it.code}]</span> {it.message}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                        {(modelValidationResult.warnings || []).length > 0 && (
+                          <div className="mt-2">
+                            <p className="text-amber-700 dark:text-amber-300 font-medium mb-1">Alertas:</p>
+                            <ul className="list-disc pl-5 space-y-0.5 text-amber-700 dark:text-amber-300">
+                              {modelValidationResult.warnings.map((it, i) => (
+                                <li key={i}><span className="font-mono text-[10px] opacity-70">[{it.code}]</span> {it.message}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
                       </div>
-                      <div>
-                        <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Texto auxiliar (Shopee)</label>
-                        <input
-                          type="text"
-                          value={ch.shopee.brand_name || ''}
-                          onChange={(e) => {
-                            const v = e.target.value;
-                            setModelEditModal((p) => {
-                              const m = parseMarketplaceMappings(p._marketplace_mappings);
-                              return {
-                                ...p,
-                                _marketplace_mappings: {
-                                  ...m,
-                                  channels: { ...m.channels, shopee: { ...m.channels.shopee, brand_name: v } },
-                                },
-                              };
-                            });
-                          }}
-                          className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                          placeholder="Notas para integração futura"
-                        />
-                      </div>
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Título alternativo (override)</label>
-                      <input
-                        type="text"
-                        value={ch.shopee.title_override || ''}
-                        onChange={(e) => {
-                          const v = e.target.value;
-                          setModelEditModal((p) => {
-                            const m = parseMarketplaceMappings(p._marketplace_mappings);
-                            return {
-                              ...p,
-                              _marketplace_mappings: {
-                                ...m,
-                                channels: { ...m.channels, shopee: { ...m.channels.shopee, title_override: v } },
-                              },
-                            };
-                          });
-                        }}
-                        className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Notas</label>
-                      <textarea
-                        rows={2}
-                        value={ch.shopee.notes || ''}
-                        onChange={(e) => {
-                          const v = e.target.value;
-                          setModelEditModal((p) => {
-                            const m = parseMarketplaceMappings(p._marketplace_mappings);
-                            return {
-                              ...p,
-                              _marketplace_mappings: {
-                                ...m,
-                                channels: { ...m.channels, shopee: { ...m.channels.shopee, notes: v } },
-                              },
-                            };
-                          });
-                        }}
-                        className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="rounded-xl border border-gray-300 dark:border-gray-600 p-4 space-y-3 bg-gray-50/50 dark:bg-gray-900/30">
-                    <div className="flex items-center gap-2">
-                      <img src="/amazon.png" alt="" className="w-6 h-6 rounded-sm object-contain" />
-                      <span className="font-semibold text-gray-900 dark:text-white">Amazon</span>
-                    </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      <div>
-                        <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Product type</label>
-                        <input
-                          type="text"
-                          value={ch.amazon.product_type || ''}
-                          onChange={(e) => {
-                            const v = e.target.value;
-                            setModelEditModal((p) => {
-                              const m = parseMarketplaceMappings(p._marketplace_mappings);
-                              return {
-                                ...p,
-                                _marketplace_mappings: {
-                                  ...m,
-                                  channels: { ...m.channels, amazon: { ...m.channels.amazon, product_type: v } },
-                                },
-                              };
-                            });
-                          }}
-                          className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 font-mono text-gray-900 dark:text-white"
-                          placeholder="ex.: LAMP"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Browse node / referência</label>
-                        <input
-                          type="text"
-                          value={ch.amazon.browse_node || ''}
-                          onChange={(e) => {
-                            const v = e.target.value;
-                            setModelEditModal((p) => {
-                              const m = parseMarketplaceMappings(p._marketplace_mappings);
-                              return {
-                                ...p,
-                                _marketplace_mappings: {
-                                  ...m,
-                                  channels: { ...m.channels, amazon: { ...m.channels.amazon, browse_node: v } },
-                                },
-                              };
-                            });
-                          }}
-                          className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                        />
-                      </div>
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Título alternativo (override)</label>
-                      <input
-                        type="text"
-                        value={ch.amazon.title_override || ''}
-                        onChange={(e) => {
-                          const v = e.target.value;
-                          setModelEditModal((p) => {
-                            const m = parseMarketplaceMappings(p._marketplace_mappings);
-                            return {
-                              ...p,
-                              _marketplace_mappings: {
-                                ...m,
-                                channels: { ...m.channels, amazon: { ...m.channels.amazon, title_override: v } },
-                              },
-                            };
-                          });
-                        }}
-                        className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Notas</label>
-                      <textarea
-                        rows={2}
-                        value={ch.amazon.notes || ''}
-                        onChange={(e) => {
-                          const v = e.target.value;
-                          setModelEditModal((p) => {
-                            const m = parseMarketplaceMappings(p._marketplace_mappings);
-                            return {
-                              ...p,
-                              _marketplace_mappings: {
-                                ...m,
-                                channels: { ...m.channels, amazon: { ...m.channels.amazon, notes: v } },
-                              },
-                            };
-                          });
-                        }}
-                        className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="rounded-xl border border-emerald-200 dark:border-emerald-800 bg-emerald-50/30 dark:bg-emerald-950/15 p-4 space-y-3">
-                    <div className="flex items-center gap-2">
-                      <img src="/leroy-merlin.png" alt="" className="w-6 h-6 rounded-sm object-contain" />
-                      <span className="font-semibold text-gray-900 dark:text-white">Leroy Merlin</span>
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Categoria / referência interna</label>
-                      <input
-                        type="text"
-                        value={ch.leroy_merlin.category_id || ''}
-                        onChange={(e) => {
-                          const v = e.target.value;
-                          setModelEditModal((p) => {
-                            const m = parseMarketplaceMappings(p._marketplace_mappings);
-                            return {
-                              ...p,
-                              _marketplace_mappings: {
-                                ...m,
-                                channels: { ...m.channels, leroy_merlin: { ...m.channels.leroy_merlin, category_id: v } },
-                              },
-                            };
-                          });
-                        }}
-                        className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">Notas</label>
-                      <textarea
-                        rows={2}
-                        value={ch.leroy_merlin.notes || ''}
-                        onChange={(e) => {
-                          const v = e.target.value;
-                          setModelEditModal((p) => {
-                            const m = parseMarketplaceMappings(p._marketplace_mappings);
-                            return {
-                              ...p,
-                              _marketplace_mappings: {
-                                ...m,
-                                channels: { ...m.channels, leroy_merlin: { ...m.channels.leroy_merlin, notes: v } },
-                              },
-                            };
-                          });
-                        }}
-                        className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-                        placeholder="Requisitos EAN, imagens 1:1, contacto comercial…"
-                      />
-                    </div>
+                    )}
+                    {/* Preview local do payload Shopee (tier_variations + modelos) */}
+                    {(() => {
+                      const vars = modelEditModal._variations || [];
+                      if (vars.length === 0) return null;
+                      const tierMap = new Map();
+                      for (const v of vars) {
+                        for (const c of v.attribute_combinations || []) {
+                          const name = (c.name || c.id || '').toString().trim();
+                          if (!name) continue;
+                          if (!tierMap.has(name)) tierMap.set(name, new Set());
+                          const opt = (c.value_name || c.value_id || '').toString().trim();
+                          if (opt) tierMap.get(name).add(opt);
+                        }
+                      }
+                      const tiers = Array.from(tierMap.entries()).map(([name, set]) => ({ name, options: Array.from(set) }));
+                      return (
+                        <div className="rounded-lg border border-gray-200 dark:border-gray-600 bg-white/60 dark:bg-gray-900/30 p-3 text-[11px] space-y-1">
+                          <p className="font-semibold text-gray-700 dark:text-gray-200">Preview Shopee (payload init_tier_variation)</p>
+                          <p>Tiers detectados: <strong>{tiers.length}</strong> {tiers.length > 2 && <span className="text-amber-600 dark:text-amber-400">(Shopee aceita no máximo 2 — tiers extras serão ignorados)</span>}</p>
+                          <ul className="list-disc pl-5 space-y-0.5">
+                            {tiers.map((t, i) => (
+                              <li key={i}><span className="font-medium">{t.name}</span>: {t.options.join(', ') || '—'}</li>
+                            ))}
+                          </ul>
+                          <p>Modelos (variações) que serão criados: <strong>{vars.length}</strong></p>
+                        </div>
+                      );
+                    })()}
                   </div>
                 </div>
               );
@@ -3623,7 +5506,7 @@ export const Anuncios = ({ user }) => {
                 </>
               )}
 
-              {/* STEP 2: Shopee placeholder */}
+              {/* STEP 2: Shopee publish */}
               {step === 2 && pm.marketplace === 'shopee' && (
                 <>
                   <div className="flex items-center gap-2 mb-4 text-xs text-gray-500 dark:text-gray-400">
@@ -3631,38 +5514,200 @@ export const Anuncios = ({ user }) => {
                     <span>Conta: <strong className="text-gray-700 dark:text-gray-300">{selectedAccount?.name || '?'}</strong></span>
                   </div>
 
-                  {/* Price */}
-                  <p className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Preço</p>
+                  <p className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Preço base</p>
                   <div className="relative mb-4">
                     <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-gray-400">R$</span>
                     <input type="number" step="0.01" min="0" value={pm.price}
-                      onChange={e => setModelPublishModal(p => ({ ...p, price: Number(e.target.value) }))}
+                      onChange={(e) => setModelPublishModal((p) => ({ ...p, price: Number(e.target.value) }))}
                       className="w-full pl-10 pr-3 py-2.5 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white font-medium" />
                   </div>
 
-                  {/* Logistics placeholder */}
-                  <p className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Logística</p>
-                  <div className="px-3 py-2.5 border dark:border-gray-600 rounded-lg text-sm bg-gray-50 dark:bg-gray-700/50 text-gray-400 dark:text-gray-500 mb-4">
-                    Configuração de logística será habilitada em breve
-                  </div>
+                  {pm.variations && pm.variations.length > 0 && (
+                    <div className="mb-4">
+                      <p className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Variações ({pm.variations.length})</p>
+                      <div className="border dark:border-gray-600 rounded-lg divide-y dark:divide-gray-700 max-h-56 overflow-y-auto">
+                        {pm.variations.map((v, i) => {
+                          const label = (v.attribute_combinations || []).map((c) => c.value_name).filter(Boolean).join(' / ') || v.seller_custom_field || `Variação ${i + 1}`;
+                          return (
+                            <div key={i} className="flex items-center gap-2 px-3 py-2 text-xs">
+                              <span className="flex-1 truncate" title={label}>{label}</span>
+                              <span className="text-gray-400">SKU {v.seller_custom_field || '—'}</span>
+                              <span className="text-gray-400">Qtd {v.available_quantity ?? 0}</span>
+                              <span className="text-gray-700 dark:text-gray-200 font-mono">R$ {Number(v.price) > 0 ? Number(v.price).toFixed(2) : Number(pm.price).toFixed(2)}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <p className="text-[10px] text-gray-400 mt-1">Edite preços/SKU/estoque por variação dentro de «Editar Modelo». A Shopee aceita até 2 tiers de variação.</p>
+                    </div>
+                  )}
 
-                  <div className="bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800 rounded-lg p-3 mb-4">
+                  <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-3 mb-4">
                     <div className="flex items-start gap-2">
-                      <AlertTriangle className="w-4 h-4 text-orange-500 flex-shrink-0 mt-0.5" />
-                      <p className="text-xs text-orange-700 dark:text-orange-400">
-                        A publicação na Shopee está em desenvolvimento. Os campos estão preparados, mas a criação do anúncio ainda não está disponível.
+                      <Info className="w-4 h-4 text-blue-500 flex-shrink-0 mt-0.5" />
+                      <p className="text-xs text-blue-700 dark:text-blue-300">
+                        Certifique-se de que o <strong>category_id da Shopee</strong> está preenchido em <em>Modelo → Mapeamento multi-marketplace</em>.
+                        A logística será inferida automaticamente dos canais ativos da conta.
                       </p>
                     </div>
                   </div>
 
                   <div className="flex justify-between gap-3 pt-2 border-t dark:border-gray-700">
-                    <button onClick={() => setModelPublishModal(p => ({ ...p, step: 1 }))}
+                    <button onClick={() => setModelPublishModal((p) => ({ ...p, step: 1 }))}
                       className="px-4 py-2 border dark:border-gray-600 text-gray-700 dark:text-gray-300 rounded-lg text-sm hover:bg-gray-50 dark:hover:bg-gray-700 flex items-center gap-1">
                       <ChevronRight className="w-4 h-4 rotate-180" /> Voltar
                     </button>
-                    <button disabled
-                      className="px-5 py-2 bg-gray-400 text-white rounded-lg text-sm font-medium cursor-not-allowed flex items-center gap-2">
-                      <Send className="w-4 h-4" /> Em breve
+                    <button onClick={handleModelPublish} disabled={modelPublishing}
+                      className="px-5 py-2 bg-orange-600 hover:bg-orange-700 disabled:bg-orange-400 text-white rounded-lg text-sm font-medium flex items-center gap-2">
+                      {modelPublishing ? <><RefreshCw className="w-4 h-4 animate-spin" /> Publicando…</> : <><Send className="w-4 h-4" /> Publicar na Shopee</>}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Multi-destination Publish Modal (1 clique, N destinos) */}
+      {multiPublishModal && (() => {
+        const mp = multiPublishModal;
+        const isTargetSelected = (marketplace, accountId) => mp.targets.some((t) => t.marketplace === marketplace && Number(t.accountId) === Number(accountId));
+        const getTarget = (marketplace, accountId) => mp.targets.find((t) => t.marketplace === marketplace && Number(t.accountId) === Number(accountId));
+        const allAccounts = [
+          ...mlAccounts.map((a) => ({ ...a, _mp: 'ml' })),
+          ...shopeeAccounts.map((a) => ({ ...a, _mp: 'shopee' })),
+        ];
+        const doneCount = mp.targets.filter((t) => t.status === 'ok').length;
+        const errorCount = mp.targets.filter((t) => t.status === 'error').length;
+
+        return (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-2xl p-6 max-h-[90vh] overflow-y-auto">
+              <div className="flex items-center justify-between mb-4">
+                <div className="min-w-0">
+                  <h3 className="text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2">
+                    <Zap className="w-5 h-5 text-purple-500" /> Publicar em múltiplos destinos
+                  </h3>
+                  <p className="text-xs text-gray-400 mt-0.5 truncate">{mp.modelTitle} {mp.modelSku && `(${mp.modelSku})`}</p>
+                </div>
+                <button onClick={() => { if (!multiPublishRunning) setMultiPublishModal(null); }} disabled={multiPublishRunning}
+                  className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-30">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {allAccounts.length === 0 ? (
+                <div className="rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/30 p-4 text-sm text-amber-800 dark:text-amber-200">
+                  Nenhuma conta conectada. Conecte pelo menos uma conta Mercado Livre ou Shopee para publicar.
+                </div>
+              ) : (
+                <>
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">Selecione as contas de destino. Você pode sobrescrever o preço por destino. A publicação é feita sequencialmente com um pequeno intervalo para respeitar rate limits das APIs.</p>
+
+                  <div className="space-y-4 mb-4">
+                    {mlAccounts.length > 0 && (
+                      <div>
+                        <p className="text-xs font-semibold text-gray-700 dark:text-gray-300 mb-2 flex items-center gap-1.5">
+                          <img src="/mercado-livre.png" alt="" className="w-4 h-4" /> Mercado Livre
+                        </p>
+                        <div className="space-y-1.5">
+                          {mlAccounts.map((acc) => {
+                            const selected = isTargetSelected('ml', acc.id);
+                            const t = getTarget('ml', acc.id);
+                            return (
+                              <div key={`ml-${acc.id}`} className={`rounded-lg border p-2 flex items-center gap-3 ${selected ? 'border-yellow-400 bg-yellow-50 dark:bg-yellow-950/20' : 'border-gray-200 dark:border-gray-700'}`}>
+                                <input type="checkbox" checked={selected} disabled={multiPublishRunning}
+                                  onChange={() => toggleMultiTarget('ml', acc.id, acc.name)} className="w-4 h-4" />
+                                <span className="flex-1 text-sm text-gray-900 dark:text-white truncate" title={acc.name}>{acc.name}</span>
+                                {selected && (
+                                  <>
+                                    <div className="relative">
+                                      <span className="absolute left-2 top-1/2 -translate-y-1/2 text-[10px] text-gray-400">R$</span>
+                                      <input type="number" step="0.01" min="0" value={t?.price ?? ''} disabled={multiPublishRunning}
+                                        onChange={(e) => updateMultiTargetField('ml', acc.id, 'price', Number(e.target.value))}
+                                        className="w-24 pl-7 pr-2 py-1 text-xs border dark:border-gray-600 rounded bg-white dark:bg-gray-700" />
+                                    </div>
+                                    <select value={t?.listing_type_id || 'gold_special'} disabled={multiPublishRunning}
+                                      onChange={(e) => updateMultiTargetField('ml', acc.id, 'listing_type_id', e.target.value)}
+                                      className="text-xs py-1 border dark:border-gray-600 rounded bg-white dark:bg-gray-700">
+                                      <option value="gold_special">Clássico</option>
+                                      <option value="gold_pro">Premium</option>
+                                    </select>
+                                  </>
+                                )}
+                                {t?.status === 'running' && <Loader2 className="w-4 h-4 animate-spin text-blue-500" />}
+                                {t?.status === 'ok' && <CheckCircle className="w-4 h-4 text-green-500" />}
+                                {t?.status === 'error' && <AlertTriangle className="w-4 h-4 text-red-500" />}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {shopeeAccounts.length > 0 && (
+                      <div>
+                        <p className="text-xs font-semibold text-gray-700 dark:text-gray-300 mb-2 flex items-center gap-1.5">
+                          <img src="/shopee.png" alt="" className="w-4 h-4" /> Shopee
+                        </p>
+                        <div className="space-y-1.5">
+                          {shopeeAccounts.map((acc) => {
+                            const selected = isTargetSelected('shopee', acc.id);
+                            const t = getTarget('shopee', acc.id);
+                            return (
+                              <div key={`sh-${acc.id}`} className={`rounded-lg border p-2 flex items-center gap-3 ${selected ? 'border-orange-400 bg-orange-50 dark:bg-orange-950/20' : 'border-gray-200 dark:border-gray-700'}`}>
+                                <input type="checkbox" checked={selected} disabled={multiPublishRunning}
+                                  onChange={() => toggleMultiTarget('shopee', acc.id, acc.name || `Shopee ${acc.id}`)} className="w-4 h-4" />
+                                <span className="flex-1 text-sm text-gray-900 dark:text-white truncate" title={acc.name}>{acc.name || `Shopee ${acc.id}`}</span>
+                                {selected && (
+                                  <div className="relative">
+                                    <span className="absolute left-2 top-1/2 -translate-y-1/2 text-[10px] text-gray-400">R$</span>
+                                    <input type="number" step="0.01" min="0" value={t?.price ?? ''} disabled={multiPublishRunning}
+                                      onChange={(e) => updateMultiTargetField('shopee', acc.id, 'price', Number(e.target.value))}
+                                      className="w-24 pl-7 pr-2 py-1 text-xs border dark:border-gray-600 rounded bg-white dark:bg-gray-700" />
+                                  </div>
+                                )}
+                                {t?.status === 'running' && <Loader2 className="w-4 h-4 animate-spin text-blue-500" />}
+                                {t?.status === 'ok' && <CheckCircle className="w-4 h-4 text-green-500" />}
+                                {t?.status === 'error' && <AlertTriangle className="w-4 h-4 text-red-500" />}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {multiPublishResults && (
+                    <div className="mb-4 rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/40 p-3">
+                      <p className="text-xs font-semibold text-gray-700 dark:text-gray-300 mb-2">Resultado: {doneCount}/{mp.targets.length} publicados {errorCount > 0 && <span className="text-red-500">• {errorCount} com erro</span>}</p>
+                      <div className="space-y-1 max-h-40 overflow-auto">
+                        {mp.targets.map((t, i) => (
+                          <div key={i} className="text-[11px] flex items-center gap-2">
+                            <span className="w-14 font-mono uppercase text-gray-500">{t.marketplace}</span>
+                            <span className="flex-1 truncate">{t.accountName}</span>
+                            {t.status === 'ok' ? (
+                              <a href={t.permalink || '#'} target="_blank" rel="noreferrer" className="text-green-600 dark:text-green-400 inline-flex items-center gap-1">
+                                <CheckCircle className="w-3 h-3" /> {t.item_id}
+                              </a>
+                            ) : t.status === 'error' ? (
+                              <span className="text-red-600 dark:text-red-400 truncate max-w-[200px]" title={t.error}>{t.error}</span>
+                            ) : (
+                              <span className="text-gray-400">aguardando…</span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="flex justify-end gap-2 pt-3 border-t dark:border-gray-700">
+                    <button onClick={() => setMultiPublishModal(null)} disabled={multiPublishRunning}
+                      className="px-4 py-2 text-sm font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg disabled:opacity-40">Fechar</button>
+                    <button onClick={handleMultiPublishRun} disabled={multiPublishRunning || mp.targets.length === 0}
+                      className="px-5 py-2 bg-purple-600 hover:bg-purple-700 disabled:bg-purple-300 text-white rounded-lg text-sm font-medium inline-flex items-center gap-2">
+                      {multiPublishRunning ? <><RefreshCw className="w-4 h-4 animate-spin" /> Publicando {mp.targets.length} destino(s)…</> : <><Zap className="w-4 h-4" /> Publicar em {mp.targets.length || '0'} destino(s)</>}
                     </button>
                   </div>
                 </>
@@ -4193,6 +6238,141 @@ export const Anuncios = ({ user }) => {
       )}
 
       {/* Model Import Modal */}
+      {mediaLibraryModal?.open && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-4xl p-6 max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h3 className="text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2">
+                  <Image className="w-5 h-5 text-purple-500" /> Biblioteca de mídia
+                </h3>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">Reaproveite fotos usadas em outros modelos. Selecione uma ou mais para adicionar ao modelo atual.</p>
+              </div>
+              <button onClick={() => setMediaLibraryModal(null)} className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="relative mb-3">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+              <input type="text" placeholder="Filtrar por título ou SKU do modelo de origem…"
+                value={mediaLibrarySearch} onChange={(e) => setMediaLibrarySearch(e.target.value)}
+                className="w-full pl-9 pr-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white" />
+            </div>
+
+            <div className="flex-1 overflow-y-auto border border-gray-200 dark:border-gray-700 rounded-lg">
+              {mediaLibraryLoading ? (
+                <div className="flex items-center justify-center py-12 text-sm text-gray-500"><Loader2 className="w-4 h-4 animate-spin mr-2" /> Carregando biblioteca…</div>
+              ) : mediaLibraryItems.length === 0 ? (
+                <div className="flex items-center justify-center py-12 text-sm text-gray-500">Nenhuma imagem encontrada.</div>
+              ) : (
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-2 p-2">
+                  {mediaLibraryItems.map((it) => {
+                    const selected = mediaLibrarySelected.has(it.url);
+                    return (
+                      <button key={it.url} type="button"
+                        onClick={() => setMediaLibrarySelected((prev) => { const next = new Set(prev); if (next.has(it.url)) next.delete(it.url); else next.add(it.url); return next; })}
+                        className={`relative group rounded-lg border-2 overflow-hidden text-left transition-all ${selected ? 'border-purple-500 ring-2 ring-purple-400/50' : 'border-transparent hover:border-gray-300 dark:hover:border-gray-600'}`}>
+                        <img src={it.url} alt="" className="w-full aspect-square object-cover bg-gray-100 dark:bg-gray-700"
+                          onError={(e) => { e.target.style.opacity = 0.25; }} />
+                        {selected && (
+                          <div className="absolute inset-0 bg-purple-500/30 flex items-center justify-center">
+                            <CheckCircle className="w-8 h-8 text-white drop-shadow" />
+                          </div>
+                        )}
+                        {it.usage_count > 1 && (
+                          <span className="absolute top-1 right-1 text-[10px] bg-black/60 text-white rounded px-1.5 py-0.5">×{it.usage_count}</span>
+                        )}
+                        <div className="p-1.5 bg-white dark:bg-gray-800">
+                          <p className="text-[10px] text-gray-600 dark:text-gray-400 truncate" title={it.source_model_title}>{it.source_model_title || '—'}</p>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between gap-2 pt-3 mt-3 border-t dark:border-gray-700">
+              <span className="text-xs text-gray-500 dark:text-gray-400">{mediaLibrarySelected.size} selecionada(s) · {mediaLibraryItems.length} disponíveis</span>
+              <div className="flex gap-2">
+                <button onClick={() => setMediaLibraryModal(null)}
+                  className="px-4 py-2 text-sm font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg">Cancelar</button>
+                <button onClick={addSelectedMediaToModel} disabled={mediaLibrarySelected.size === 0}
+                  className="px-5 py-2 bg-purple-600 hover:bg-purple-700 disabled:bg-purple-300 text-white rounded-lg text-sm font-medium inline-flex items-center gap-2">
+                  <Plus className="w-4 h-4" /> Adicionar {mediaLibrarySelected.size > 0 ? `(${mediaLibrarySelected.size})` : ''}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {importByIdModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-md p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-gray-900 dark:text-white flex items-center gap-2">
+                <Link2 className="w-5 h-5 text-indigo-500" /> Importar por ID
+              </h3>
+              <button onClick={() => !importByIdLoading && setImportByIdModal(null)} className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">Cole o ID do anúncio do marketplace para criar (ou atualizar) o modelo correspondente.</p>
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">Marketplace</label>
+                <div className="flex gap-2">
+                  {[{ id: 'ml', label: 'Mercado Livre', icon: '/mercado-livre.png' }, { id: 'shopee', label: 'Shopee', icon: '/shopee.png' }].map((opt) => (
+                    <button key={opt.id} type="button"
+                      onClick={() => setImportByIdModal((p) => ({ ...p, marketplace: opt.id, accountId: '' }))}
+                      className={`flex-1 px-3 py-2 text-sm rounded-lg border flex items-center justify-center gap-2 transition-colors ${importByIdModal.marketplace === opt.id ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300' : 'border-gray-200 dark:border-gray-600 text-gray-600 dark:text-gray-300'}`}>
+                      <img src={opt.icon} alt="" className="w-4 h-4" /> {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  {importByIdModal.marketplace === 'shopee' ? 'Shopee item_id' : 'ID do anúncio (MLB...)'}
+                </label>
+                <input type="text" value={importByIdModal.itemId}
+                  onChange={(e) => setImportByIdModal((p) => ({ ...p, itemId: e.target.value }))}
+                  placeholder={importByIdModal.marketplace === 'shopee' ? 'ex: 12345678901' : 'ex: MLB1234567890'}
+                  className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white font-mono" />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">Conta</label>
+                <select value={importByIdModal.accountId}
+                  onChange={(e) => setImportByIdModal((p) => ({ ...p, accountId: e.target.value }))}
+                  className="w-full px-3 py-2 border dark:border-gray-600 rounded-lg text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white">
+                  <option value="">Selecione a conta…</option>
+                  {(importByIdModal.marketplace === 'shopee' ? shopeeAccounts : mlAccounts).map((acc) => (
+                    <option key={acc.id} value={acc.id}>{acc.name || `Conta ${acc.id}`}</option>
+                  ))}
+                </select>
+                {(importByIdModal.marketplace === 'shopee' ? shopeeAccounts : mlAccounts).length === 0 && (
+                  <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-1">Nenhuma conta conectada para este marketplace.</p>
+                )}
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-4 mt-4 border-t dark:border-gray-700">
+              <button onClick={() => setImportByIdModal(null)} disabled={importByIdLoading}
+                className="px-4 py-2 text-sm font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg disabled:opacity-40">Cancelar</button>
+              <button onClick={handleImportById} disabled={importByIdLoading || !importByIdModal.itemId || !importByIdModal.accountId}
+                className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white rounded-lg text-sm font-medium inline-flex items-center gap-2">
+                {importByIdLoading ? <><RefreshCw className="w-4 h-4 animate-spin" /> Importando…</> : <><Download className="w-4 h-4" /> Importar</>}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {modelImportModal && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
           <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col p-6">
@@ -4200,18 +6380,21 @@ export const Anuncios = ({ user }) => {
               <h3 className="text-lg font-bold text-gray-900 dark:text-white">Importar de Anúncio Ativo</h3>
               <button onClick={() => setModelImportModal(null)} className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700"><X className="w-5 h-5" /></button>
             </div>
-            <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">Selecione um anúncio ML ativo para criar o modelo:</p>
+            <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">Selecione um anúncio ativo (Mercado Livre ou Shopee) para criar o modelo:</p>
             <div className="flex-1 overflow-y-auto border dark:border-gray-700 rounded-lg min-h-0" style={{ maxHeight: '500px' }}>
-              {items.filter(i => i.source === 'ml').length === 0 ? (
-                <div className="text-center py-8 text-gray-400 text-sm">Nenhum anúncio ML sincronizado. Sincronize primeiro na aba "Anúncios Ativos".</div>
-              ) : items.filter(i => i.source === 'ml').map(item => (
+              {items.filter((i) => i.source === 'ml' || i.source === 'shopee').length === 0 ? (
+                <div className="text-center py-8 text-gray-400 text-sm">Nenhum anúncio sincronizado. Sincronize primeiro na aba "Anúncios Ativos".</div>
+              ) : items.filter((i) => i.source === 'ml' || i.source === 'shopee').map((item) => (
                 <button key={item.uid} onClick={async () => { await handleModelImportFromItem(item); setModelImportModal(null); }}
                   className="w-full text-left px-4 py-3 hover:bg-blue-50 dark:hover:bg-blue-900/30 border-b dark:border-gray-700/50 transition-colors flex items-center gap-3">
                   {item.thumbnail && <img src={item.thumbnail} alt="" className="w-10 h-10 rounded object-cover bg-gray-100 dark:bg-gray-700 flex-shrink-0" />}
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm text-gray-900 dark:text-white font-medium truncate">{item.title}</p>
+                    <div className="flex items-center gap-2 mb-0.5">
+                      {sourceBadge(item)}
+                      <p className="text-sm text-gray-900 dark:text-white font-medium truncate">{item.title}</p>
+                    </div>
                     <div className="flex items-center gap-2 text-[11px] text-gray-400">
-                      <span>{item.ml_item_id}</span>
+                      <span>{item.item_id_display}</span>
                       {item.sku && <span className="font-mono">SKU: {item.sku}</span>}
                       <span>{formatPrice(item.price)}</span>
                     </div>

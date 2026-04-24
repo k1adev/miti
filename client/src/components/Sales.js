@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { DollarSign, ShoppingCart, Printer, RefreshCw, ExternalLink, Package, CheckCircle, X, Check, Trash2, Send, Store, ChevronDown, ChevronUp, FileText, Truck, CreditCard, User, MapPin, Save, Copy, Eye, MoreVertical, Calendar } from 'lucide-react';
+import { DollarSign, ShoppingCart, Printer, RefreshCw, ExternalLink, Package, CheckCircle, X, Check, Trash2, Send, Store, ChevronDown, ChevronUp, FileText, Truck, CreditCard, User, MapPin, Save, Copy, Eye, MoreVertical, Calendar, AlertCircle, Archive, History } from 'lucide-react';
 import axios from 'axios';
 import { DateRangePicker } from './DateRangePicker';
 import { useLocation, useNavigate } from 'react-router-dom';
@@ -67,6 +67,13 @@ export const Sales = () => {
   const mm = String(hoje.getMonth() + 1).padStart(2, '0');
   const dd = String(hoje.getDate()).padStart(2, '0');
   const dataHoje = `${yyyy}-${mm}-${dd}`;
+  const dataHojeMenos7 = (() => {
+    const d = new Date(); d.setDate(d.getDate() - 7);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const dia = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${dia}`;
+  })();
   const [dataInicial, setDataInicial] = useState(() => localStorage.getItem('miti_dataInicial') || dataHoje);
   const [dataFinal, setDataFinal] = useState(() => localStorage.getItem('miti_dataFinal') || dataHoje);
   const [filtro12h, setFiltro12h] = useState(() => localStorage.getItem('miti_filtro12h') === 'true');
@@ -126,7 +133,11 @@ export const Sales = () => {
   const [mktSearch, setMktSearch] = useState('');
   const [mktStatusFilter, setMktStatusFilter] = useState('');
   const [mktMarketplaceFilter, setMktMarketplaceFilter] = useState('');
-  const [mktDateFrom, setMktDateFrom] = useState(dataHoje);
+  const [mktPipelineFilter, setMktPipelineFilter] = useState('');
+  const [mktLabelFilter, setMktLabelFilter] = useState(''); // ''=todas, 'pending', 'printed'
+  const [shopeeAccounts, setShopeeAccounts] = useState([]);
+  const [mktBillingMapping, setMktBillingMapping] = useState([]);
+  const [mktDateFrom, setMktDateFrom] = useState(dataHojeMenos7);
   const [mktDateTo, setMktDateTo] = useState(dataHoje);
   const [mktShowDatePicker, setMktShowDatePicker] = useState(false);
   const mktDatePickerRef = useRef(null);
@@ -144,7 +155,15 @@ export const Sales = () => {
   const [mktNfForm, setMktNfForm] = useState({ nf_manual_number: '', nf_manual_key: '', nf_manual_serie: '', nf_manual_date: '' });
   const [mktNfSaving, setMktNfSaving] = useState(false);
   const [mktNfeData, setMktNfeData] = useState(null);
+  const [mktNfManualOpen, setMktNfManualOpen] = useState(false);
+  const [mktBulkMenuOpen, setMktBulkMenuOpen] = useState(false);
+  const [mktCardMenuOpen, setMktCardMenuOpen] = useState(null);
+  const [mktBackupStatus, setMktBackupStatus] = useState(null);
+  const [mktHistoryOpenFor, setMktHistoryOpenFor] = useState(null);
+  const [mktHistoryRows, setMktHistoryRows] = useState([]);
+  const [mktHistoryLoading, setMktHistoryLoading] = useState(false);
   const [mktNfeLoading, setMktNfeLoading] = useState(false);
+  const mktSearchDebounceRef = useRef(null);
 
   // --- Marketplace Orders functions ---
   const fetchMlAccounts = useCallback(async () => {
@@ -155,6 +174,20 @@ export const Sales = () => {
       if (!activeMlAccountId && accs.length > 0) setActiveMlAccountId(accs[0].id);
     } catch { setMlAccounts([]); }
   }, [activeMlAccountId]);
+
+  const fetchShopeeAccountsLight = useCallback(async () => {
+    try {
+      const res = await axios.get('/api/shopee/accounts');
+      setShopeeAccounts(Array.isArray(res.data?.accounts) ? res.data.accounts : []);
+    } catch { setShopeeAccounts([]); }
+  }, []);
+
+  const fetchBillingMapping = useCallback(async () => {
+    try {
+      const res = await axios.get('/api/marketplace-bling-mapping');
+      setMktBillingMapping(Array.isArray(res.data) ? res.data : []);
+    } catch { setMktBillingMapping([]); }
+  }, []);
 
   const fetchInventory = useCallback(async () => {
     try {
@@ -179,18 +212,28 @@ export const Sales = () => {
       const searchVal = override?.search ?? mktSearch;
       const dateFrom = override?.dateFrom ?? mktDateFrom;
       const dateTo = override?.dateTo ?? mktDateTo;
+      const pipelineFilter = override?.pipeline ?? mktPipelineFilter;
       if (mktFilter) params.marketplace = mktFilter;
       if (statusFilter) params.status = statusFilter;
       if (searchVal) params.search = searchVal;
       if (dateFrom) params.dateFrom = dateFrom;
       if (dateTo) params.dateTo = dateTo;
+      if (pipelineFilter) params.pipeline_stage = pipelineFilter;
       const res = await axios.get('/api/marketplace-orders', { params });
       const orders = Array.isArray(res.data?.orders) ? res.data.orders : [];
       setMktOrders(orders);
       setMktTotal(res.data?.total || orders.length);
 
-      // Batch check NF-e for orders that don't have bling_nfe_numero yet
-      const needsNfeCheck = orders.filter(o => !o.bling_nfe_numero && !o.nf_manual_number).map(o => o.id);
+      // Batch check NF-e APENAS para pedidos que não têm cache negativo recente
+      // (bling_nfe_checked_at) - o backend também filtra com TTL de 30min, mas
+      // aqui evitamos a chamada HTTP toda quando nada precisa.
+      // Máx 50 pedidos por lote para não travar o Bling.
+      const needsNfeCheck = orders
+        .filter(o => !o.bling_nfe_numero && !o.nf_manual_number && !o.ml_invoice_key)
+        .filter(o => !o.bling_nfe_checked_at ||
+                     (Date.now() - new Date(o.bling_nfe_checked_at).getTime()) > 30 * 60 * 1000)
+        .slice(0, 50)
+        .map(o => o.id);
       if (needsNfeCheck.length > 0) {
         try {
           const batchRes = await axios.post('/api/marketplace-orders/batch-nfe-check', { orderIds: needsNfeCheck });
@@ -206,6 +249,7 @@ export const Sales = () => {
                   bling_nfe_id: r.bling_nfe_id || o.bling_nfe_id,
                   bling_nfe_status: r.nfe_numero ? 'generated' : o.bling_nfe_status,
                   bling_nfe_chave: r.nfe_chave || o.bling_nfe_chave,
+                  bling_nfe_checked_at: new Date().toISOString(),
                 };
               }
               return o;
@@ -213,71 +257,378 @@ export const Sales = () => {
           }
         } catch (batchErr) { console.log('[batch-nfe-check error]', batchErr); }
       }
+
+      // Também busca NFes do Faturador ML em background para pedidos ML sem chave.
+      // Limita a 20 pedidos/carga para não bloquear — o cron do backend cuida do resto.
+      const mlOrderIds = orders
+        .filter(o => o.marketplace === 'ml' && !o.ml_invoice_key && !o.nf_manual_number && o.account_id)
+        .slice(0, 20)
+        .map(o => o.id);
+      if (mlOrderIds.length > 0) {
+        axios.post('/api/marketplace-orders/fetch-ml-invoices', { orderIds: mlOrderIds })
+          .then(async r => {
+            if (r?.data?.updated > 0) {
+              // Backend encontrou NFes novas — recarrega silenciosamente os
+              // pedidos afetados para refletir na UI sem piscar a tela.
+              try {
+                const detailPromises = mlOrderIds.map(id =>
+                  axios.get(`/api/marketplace-orders/${id}`).then(d => d.data).catch(() => null));
+                const details = await Promise.all(detailPromises);
+                const byId = {};
+                for (const d of details) { if (d && d.id) byId[d.id] = d; }
+                setMktOrders(prev => prev.map(o => byId[o.id] ? { ...o, ...byId[o.id] } : o));
+              } catch (_) { /* silencioso */ }
+            }
+          })
+          .catch(() => {});
+      }
     } catch (err) {
       console.error('[fetchMktOrders error]', err);
       setMktOrders([]);
       setMktTotal(0);
       if (err.response?.status === 401 || /token|não conectado/i.test(String(err.response?.data?.error || ''))) {
-        toast.error('Token ML indisponível. Reautorize em APIs Externas.');
+        toast.error('Token ML indisponível. Reautorize em Configurações.');
       }
     }
     setMktLoading(false);
-  }, [mktMarketplaceFilter, mktStatusFilter, mktSearch, mktDateFrom, mktDateTo, mktPage]);
+  }, [mktMarketplaceFilter, mktStatusFilter, mktPipelineFilter, mktSearch, mktDateFrom, mktDateTo, mktPage, toast]);
 
-  const syncMktOrders = async (marketplace = 'ml') => {
-    if (marketplace === 'ml' && (!mlAccounts || mlAccounts.length === 0)) {
-      toast.error('Nenhuma conta ML configurada');
+  const handleMktSearchChange = useCallback((e) => {
+    const v = e.target.value;
+    setMktSearch(v);
+    if (mktSearchDebounceRef.current) clearTimeout(mktSearchDebounceRef.current);
+    mktSearchDebounceRef.current = setTimeout(() => {
+      mktSearchDebounceRef.current = null;
+      setMktPage(1);
+      fetchMktOrders(1, { search: v });
+    }, 400);
+  }, [fetchMktOrders]);
+
+  // Status do backup noturno — carrega ao entrar na tela e atualiza a cada
+  // 5 minutos. Não bloqueia a UI se o endpoint falhar.
+  const fetchBackupStatus = useCallback(async () => {
+    try {
+      const r = await axios.get('/api/marketplace-orders/backup-status');
+      setMktBackupStatus(r.data || null);
+    } catch (_) { /* silencioso */ }
+  }, []);
+  useEffect(() => {
+    fetchBackupStatus();
+    const id = setInterval(fetchBackupStatus, 5 * 60 * 1000);
+    return () => clearInterval(id);
+  }, [fetchBackupStatus]);
+
+  const openOrderHistory = useCallback(async (orderId) => {
+    setMktHistoryOpenFor(orderId);
+    setMktHistoryLoading(true);
+    setMktHistoryRows([]);
+    try {
+      const r = await axios.get(`/api/marketplace-orders/${orderId}/history`);
+      setMktHistoryRows(Array.isArray(r.data) ? r.data : []);
+    } catch (e) {
+      toast.error('Erro ao carregar histórico');
+    }
+    setMktHistoryLoading(false);
+  }, [toast]);
+
+  const forceHydrateOrder = useCallback(async (orderId) => {
+    try {
+      const r = await axios.post(`/api/marketplace-orders/${orderId}/hydrate`);
+      if (r.data?.recorded) toast.success(`Backup atualizado (${(r.data.changed || []).length} campos mudaram)`);
+      else toast.info('Nenhuma mudança detectada desde o último backup');
+      fetchMktOrders();
+      fetchBackupStatus();
+    } catch (e) {
+      if (e.response?.status === 410) toast.error('Marketplace não devolve mais dados — pedido congelado');
+      else toast.error(e.response?.data?.error || 'Erro ao forçar backup');
+    }
+  }, [fetchMktOrders, fetchBackupStatus, toast]);
+
+  // Busca unificada: sincroniza pedidos + NFes do ML Faturador + NFes do Bling
+  // numa única chamada. Respeita o filtro de canal atual (mktMarketplaceFilter):
+  // vazio → ML + Shopee; 'ml' → só ML; 'shopee' → só Shopee.
+  const runUnifiedSearch = async () => {
+    const channel = mktMarketplaceFilter || null;
+    const needMl = !channel || channel === 'ml';
+    const needSp = !channel || channel === 'shopee';
+    if (needMl && (!mlAccounts || mlAccounts.length === 0) && needSp && (!shopeeAccounts || shopeeAccounts.length === 0)) {
+      toast.error('Nenhuma conta ML ou Shopee configurada');
       return;
+    }
+    if (channel === 'ml' && (!mlAccounts || mlAccounts.length === 0)) {
+      toast.error('Nenhuma conta ML configurada'); return;
+    }
+    if (channel === 'shopee' && (!shopeeAccounts || shopeeAccounts.length === 0)) {
+      toast.error('Nenhuma conta Shopee configurada'); return;
     }
     setMktSyncing(true);
     try {
-      let totalSynced = 0;
-      for (const acc of mlAccounts) {
-        const res = await axios.post('/api/marketplace-orders/sync', { marketplace, accountId: acc.id, dateFrom: mktDateFrom, dateTo: mktDateTo });
-        totalSynced += res.data?.synced || 0;
+      const res = await axios.post('/api/marketplace-orders/sync-all', {
+        marketplace: channel,
+        dateFrom: mktDateFrom,
+        dateTo: mktDateTo,
+        fetchInvoices: true,
+      });
+      const synced = res.data?.synced || { ml: 0, shopee: 0 };
+      const totals = res.data?.totals || { ml: 0, shopee: 0 };
+      const invoices = res.data?.invoices || { found_ml: 0, found_bling: 0 };
+      const totalOrders = (synced.ml || 0) + (synced.shopee || 0);
+      const totalBruto = (totals.ml || 0) + (totals.shopee || 0);
+      const totalNfes = (invoices.found_ml || 0) + (invoices.found_bling || 0);
+      if (totalBruto === 0) {
+        toast.info('Nenhum pedido no período selecionado. Aumente o intervalo de datas para buscar pedidos mais antigos.');
+      } else {
+        const parts = [`${totalOrders} pedido(s) sincronizado(s)`];
+        if (totalBruto !== totalOrders) parts.push(`de ${totalBruto} encontrado(s)`);
+        if (totalNfes > 0) parts.push(`${totalNfes} NFe(s) atualizada(s)`);
+        toast.success(parts.join(' · '));
       }
-      toast.success(`${totalSynced} pedidos sincronizados`);
+      if (Array.isArray(res.data?.errors) && res.data.errors.length > 0) {
+        console.warn('[SyncAll] erros parciais:', res.data.errors);
+      }
       fetchMktOrders();
     } catch (err) {
       const msg = err.response?.data?.error || err.response?.data?.details || err.message || 'Erro ao sincronizar pedidos';
       const isTokenError = /token|não conectado|refresh_token|re-authorize/i.test(String(msg));
-      toast.error(isTokenError ? `${msg} Reautorize em APIs Externas.` : msg);
+      toast.error(isTokenError ? `${msg} Reautorize em Configurações.` : msg);
     }
     setMktSyncing(false);
   };
 
   const sendOrderToBling = async (orderId) => {
-    if (!activeAccountId) { toast.error('Selecione uma conta Bling'); return; }
+    // blingAccountId agora é opcional — servidor resolve via mapeamento.
+    // O backend agora faz fluxo end-to-end síncrono: cria pedido → gera NFe →
+    // faz polling (até ~60s) → sobe XML ao Shopee. Por isso timeout amplo.
     console.log(`[FRONTEND DEBUG] sendOrderToBling: orderId=${orderId}, blingAccountId=${activeAccountId}, activeMlAccountId=${activeMlAccountId}`);
     setMktSending(prev => new Set([...prev, orderId]));
     try {
-      const res = await axios.post(`/api/marketplace-orders/${orderId}/send-to-bling`, { blingAccountId: activeAccountId });
+      const body = activeAccountId ? { blingAccountId: activeAccountId } : {};
+      const res = await axios.post(`/api/marketplace-orders/${orderId}/send-to-bling`, body, { timeout: 120000 });
       console.log('[FRONTEND DEBUG] sendOrderToBling response:', res.data);
       if (res.data?.success) {
-        toast.success(`Pedido enviado ao Bling! NF-e: ${res.data.bling_nfe_status}`);
+        const d = res.data;
+        if (d.uploaded_to_shopee) {
+          toast.success(`NFe ${d.bling_nfe_numero || ''} autorizada e enviada ao Shopee`);
+        } else if (d.bling_nfe_status === 'authorized' && d.pending_upload) {
+          toast.info(`NFe ${d.bling_nfe_numero || ''} autorizada. Upload ao Shopee em andamento — o sistema finalizará automaticamente.`);
+        } else if (d.bling_nfe_status === 'authorized') {
+          toast.success(`NFe ${d.bling_nfe_numero || ''} autorizada`);
+        } else {
+          toast.info(`Pedido enviado ao Bling (status NFe: ${d.bling_nfe_status}). O sistema concluirá o envio automaticamente.`);
+        }
         fetchMktOrders();
       }
     } catch (err) {
       console.error('[FRONTEND DEBUG] sendOrderToBling error:', err.response?.status, err.response?.data);
-      toast.error(err.response?.data?.error || 'Erro ao enviar para Bling');
+      toast.error(err.response?.data?.error || err.message || 'Erro ao enviar para Bling');
     }
     setMktSending(prev => { const s = new Set(prev); s.delete(orderId); return s; });
   };
 
   const sendBulkToBling = async () => {
-    if (!activeAccountId) { toast.error('Selecione uma conta Bling'); return; }
     if (mktSelectedIds.length === 0) { toast.error('Selecione pedidos para enviar'); return; }
     const ids = [...mktSelectedIds];
     setMktSending(new Set(ids));
+    toast.info(`Processando ${ids.length} pedido(s) — isto pode demorar enquanto o Bling autoriza e o Shopee recebe a NFe.`);
     try {
-      const res = await axios.post('/api/marketplace-orders/send-to-bling-bulk', { orderIds: ids, blingAccountId: activeAccountId });
+      // blingAccountId é opcional — o servidor resolve pela conta-marketplace
+      // via mapeamento. Só mandamos override quando o usuário escolheu uma.
+      const body = activeAccountId ? { orderIds: ids, blingAccountId: activeAccountId } : { orderIds: ids };
+      // Timeout amplo: cada pedido pode levar até ~90s no pior caso.
+      const res = await axios.post('/api/marketplace-orders/send-to-bling-bulk', body, { timeout: Math.max(120000, ids.length * 90000) });
       toast.success(`${res.data.sent || 0} enviados, ${res.data.skipped || 0} ignorados, ${res.data.errors?.length || 0} erros`);
+      setMktSelectedIds([]);
+      fetchMktOrders();
+    } catch (err) {
+      toast.error(err.response?.data?.error || err.message || 'Erro no envio em lote');
+    }
+    setMktSending(new Set());
+  };
+
+  // Busca a NFe emitida dentro do Mercado Livre (pedidos ML, singular).
+  const fetchMlInvoice = async (orderId) => {
+    setMktSending(prev => new Set(prev).add(orderId));
+    try {
+      const res = await axios.post(`/api/marketplace-orders/${orderId}/fetch-ml-invoice`);
+      const data = res.data || {};
+      if (data.source === 'faturador' && data.ml_invoice_key) {
+        toast.success(`NFe ML ${data.ml_invoice_number || ''} encontrada (Faturador)`);
+      } else if (data.source === 'packs_uploaded') {
+        toast.info(`Documento carregado no ML (${data.found} arquivo${data.found > 1 ? 's' : ''}), mas sem chave — emita pelo Bling para ter NFe completa.`);
+      } else {
+        toast.info(data.message || 'Nenhuma NFe encontrada');
+      }
+      fetchMktOrders();
+    } catch (err) {
+      const data = err.response?.data || {};
+      if (err.response?.status === 404) {
+        toast.info(data.message || 'NFe não disponível — emita pelo Bling ou aguarde a propagação');
+      } else {
+        toast.error(data.error || data.message || 'Erro ao buscar NFe ML');
+      }
+    }
+    setMktSending(prev => { const s = new Set(prev); s.delete(orderId); return s; });
+  };
+
+  // Massa: busca NFes ML para os pedidos selecionados.
+  const bulkFetchMlInvoices = async () => {
+    const ids = mktSelectedIds.filter(id => {
+      const o = mktOrders.find(x => x.id === id);
+      return o && o.marketplace === 'ml' && !o.ml_invoice_key;
+    });
+    if (!ids.length) { toast.error('Selecione pedidos ML sem NFe'); return; }
+    try {
+      const res = await axios.post('/api/marketplace-orders/fetch-ml-invoices', { orderIds: ids });
+      toast.success(`${res.data.updated || 0} NFes encontradas (${res.data.empty || 0} sem NFe, ${res.data.errors?.length || 0} erros)`);
+      setMktSelectedIds([]);
+      fetchMktOrders();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erro na busca em lote');
+    }
+  };
+
+  // Atualiza status da NFe gerada no Bling (Shopee). Singular + massa.
+  const pollBlingNfe = async (orderId) => {
+    setMktSending(prev => new Set(prev).add(orderId));
+    try {
+      const res = await axios.post(`/api/marketplace-orders/${orderId}/poll-bling-nfe`);
+      toast.success(`NFe: ${res.data.status || '-'} ${res.data.numero ? `(nº ${res.data.numero})` : ''}`);
+      fetchMktOrders();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erro ao consultar NFe no Bling');
+    }
+    setMktSending(prev => { const s = new Set(prev); s.delete(orderId); return s; });
+  };
+
+  const bulkPollBlingNfes = async () => {
+    const ids = mktSelectedIds.filter(id => {
+      const o = mktOrders.find(x => x.id === id);
+      return o && o.bling_nfe_id;
+    });
+    if (!ids.length) { toast.error('Selecione pedidos com NFe em Bling'); return; }
+    try {
+      const res = await axios.post('/api/marketplace-orders/poll-bling-nfes', { orderIds: ids });
+      toast.success(`${res.data.authorized || 0} autorizadas de ${res.data.processed || 0}`);
+      fetchMktOrders();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erro ao atualizar NFes');
+    }
+  };
+
+  // Upload do XML para a Shopee.
+  const uploadInvoiceShopee = async (orderId) => {
+    setMktSending(prev => new Set(prev).add(orderId));
+    try {
+      await axios.post(`/api/marketplace-orders/${orderId}/upload-invoice-shopee`);
+      toast.success('NFe enviada ao Shopee');
+      fetchMktOrders();
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Erro ao enviar NFe ao Shopee');
+    }
+    setMktSending(prev => { const s = new Set(prev); s.delete(orderId); return s; });
+  };
+
+  const bulkUploadShopee = async () => {
+    const ids = mktSelectedIds.filter(id => {
+      const o = mktOrders.find(x => x.id === id);
+      return o && o.marketplace === 'shopee' && o.bling_nfe_numero && !o.nf_uploaded_at;
+    });
+    if (!ids.length) { toast.error('Selecione pedidos Shopee com NFe pronta'); return; }
+    try {
+      const res = await axios.post('/api/marketplace-orders/upload-invoices-shopee', { orderIds: ids });
+      toast.success(`${res.data.uploaded || 0} enviadas, ${res.data.skipped || 0} ignoradas, ${res.data.errors?.length || 0} erros`);
       setMktSelectedIds([]);
       fetchMktOrders();
     } catch (err) {
       toast.error(err.response?.data?.error || 'Erro no envio em lote');
     }
-    setMktSending(new Set());
+  };
+
+  // Pedidos já despachados, entregues, cancelados ou em trânsito não
+  // permitem imprimir etiqueta novamente pelo ML/Shopee. Também ocultamos
+  // quando ainda não há NFe emitida: o ML só libera etiqueta após a NFe
+  // estar vinculada ao shipment e, para Shopee, queremos o mesmo alinhamento
+  // (sem NFe, não mandamos imprimir).
+  const canPrintLabelFor = (order) => {
+    if (!order) return false;
+    if (order.status === 'cancelled') return false;
+    const ss = order.shipping_status;
+    const blockedShipping = ['shipped', 'delivered', 'in_transit', 'not_delivered', 'cancelled'];
+    if (ss && blockedShipping.includes(ss)) return false;
+    // ML Full: a etiqueta é impressa pelo próprio ML e o vendedor envia em lote
+    // ao centro de distribuição. Nunca exibimos "imprimir etiqueta" para FULL.
+    const logType = String(order.shipping_type || order.logistic_type || '').toLowerCase();
+    if (order.marketplace === 'ml' && (logType === 'fulfillment' || logType === 'full')) return false;
+    const hasNfe = !!(order.bling_nfe_chave || order.bling_nfe_numero || order.ml_invoice_key || order.nf_manual_number);
+    if (!hasNfe) return false;
+    return (order.marketplace === 'ml' && order.shipping_id) || order.marketplace === 'shopee';
+  };
+
+  // Baixa a etiqueta de envio (ML ou Shopee) como PDF e abre em nova aba.
+  const printShippingLabel = async (orderId) => {
+    setMktSending(prev => new Set(prev).add(orderId));
+    try {
+      const res = await axios.get(`/api/marketplace-orders/${orderId}/shipping-label`, { responseType: 'blob' });
+      const blob = new Blob([res.data], { type: res.headers['content-type'] || 'application/pdf' });
+      const url = URL.createObjectURL(blob);
+      const win = window.open(url, '_blank');
+      if (!win) {
+        const a = document.createElement('a');
+        a.href = url; a.download = `etiqueta-${orderId}.pdf`;
+        document.body.appendChild(a); a.click(); a.remove();
+      }
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (err) {
+      // Blob de erro → tentamos ler como texto para trazer a mensagem do servidor.
+      let msg = 'Erro ao gerar etiqueta';
+      try {
+        if (err.response?.data instanceof Blob) {
+          const text = await err.response.data.text();
+          const j = JSON.parse(text);
+          msg = j.details || j.error || msg;
+        } else msg = err.response?.data?.error || err.message || msg;
+      } catch {}
+      toast.error(msg);
+    }
+    setMktSending(prev => { const s = new Set(prev); s.delete(orderId); return s; });
+  };
+
+  // Em massa: baixa um PDF único com todas as etiquetas mescladas.
+  // O backend responde application/pdf e, quando há falhas individuais,
+  // expõe a contagem no header X-Label-Errors.
+  const bulkPrintShippingLabels = async () => {
+    const ids = mktSelectedIds.filter(id => {
+      const o = mktOrders.find(x => x.id === id);
+      return canPrintLabelFor(o);
+    });
+    if (!ids.length) { toast.error('Nenhum pedido selecionado permite imprimir etiqueta'); return; }
+    toast.info(`Gerando ${ids.length} etiqueta(s)...`);
+    try {
+      const res = await axios.post('/api/marketplace-orders/shipping-labels', { orderIds: ids }, { responseType: 'blob' });
+      const blob = new Blob([res.data], { type: 'application/pdf' });
+      const url = URL.createObjectURL(blob);
+      const win = window.open(url, '_blank');
+      if (!win) {
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `etiquetas-${new Date().toISOString().slice(0, 10)}.pdf`;
+        document.body.appendChild(a); a.click(); a.remove();
+      }
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      const errCount = parseInt(res.headers?.['x-label-errors'] || '0', 10);
+      if (errCount > 0) toast.warn(`PDF pronto com ${errCount} etiqueta(s) com erro.`);
+      else toast.success('PDF de etiquetas pronto');
+    } catch (err) {
+      let msg = 'Erro ao gerar etiquetas em lote';
+      try {
+        if (err.response?.data instanceof Blob) {
+          const text = await err.response.data.text();
+          const j = JSON.parse(text);
+          msg = j.details ? `${j.error || msg}: ${Array.isArray(j.details) ? j.details.join('; ') : j.details}` : (j.error || msg);
+        } else msg = err.response?.data?.error || err.message || msg;
+      } catch {}
+      toast.error(msg);
+    }
   };
 
   const toggleOrderDetail = async (orderId) => {
@@ -285,11 +636,13 @@ export const Sales = () => {
       setMktExpandedId(null);
       setMktDetailData(null);
       setMktNfeData(null);
+      setMktNfManualOpen(false);
       return;
     }
     setMktExpandedId(orderId);
     setMktDetailLoading(true);
     setMktNfeData(null);
+    setMktNfManualOpen(false);
     try {
       const res = await axios.get(`/api/marketplace-orders/${orderId}/detail`);
       setMktDetailData(res.data);
@@ -390,6 +743,8 @@ export const Sales = () => {
   useEffect(() => {
     if (activeTab === 'marketplace') {
       fetchMlAccounts();
+      fetchShopeeAccountsLight();
+      fetchBillingMapping();
       fetchInventory();
       fetchAdModels();
       // Busca sem filtro ao entrar na aba: limpa filtros e busca últimos 30 dias
@@ -398,6 +753,10 @@ export const Sales = () => {
       trintaDiasAtras.setDate(trintaDiasAtras.getDate() - 30);
       const dateFrom = trintaDiasAtras.toISOString().slice(0, 10);
       const dateTo = hoje.toISOString().slice(0, 10);
+      if (mktSearchDebounceRef.current) {
+        clearTimeout(mktSearchDebounceRef.current);
+        mktSearchDebounceRef.current = null;
+      }
       setMktSearch('');
       setMktStatusFilter('');
       setMktMarketplaceFilter('');
@@ -406,7 +765,12 @@ export const Sales = () => {
       setMktPage(1);
       fetchMktOrders(1, { search: '', status: '', marketplace: '', dateFrom, dateTo });
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- só ao trocar de aba; fetchMktOrders muda com filtros e resetaria o período
   }, [activeTab]);
+
+  useEffect(() => () => {
+    if (mktSearchDebounceRef.current) clearTimeout(mktSearchDebounceRef.current);
+  }, []);
 
   useEffect(() => {
     if (!mktShowDatePicker) return;
@@ -2135,6 +2499,110 @@ export const Sales = () => {
       magalu: '/magalu.png',
     };
 
+    // Estado da etiqueta para chip visual + variação do botão primário.
+    // Retorna null quando não faz sentido mostrar (sem NFe, cancelado, FULL já cumprido).
+    const labelInfoFor = (order) => {
+      const logType = String(order?.shipping_type || order?.logistic_type || '').toLowerCase();
+      if (order?.marketplace === 'ml' && (logType === 'fulfillment' || logType === 'full')) {
+        return {
+          state: 'full',
+          label: 'ML imprime (FULL)',
+          cls: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300',
+        };
+      }
+      const eligible = canPrintLabelFor(order);
+      if (!eligible && !order?.label_printed_at) return null;
+      if (order?.label_printed_at) {
+        return {
+          state: 'printed',
+          label: 'Etiqueta impressa',
+          cls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300',
+          at: order.label_printed_at,
+          by: order.label_printed_by || null,
+        };
+      }
+      return {
+        state: 'pending',
+        label: 'Etiqueta pendente',
+        cls: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300',
+      };
+    };
+
+    // A cor/label que vai aparecer como AÇÃO PRIMÁRIA de cada cartão —
+    // ações redundantes (ml-fetch, bling-poll) ficam escondidas no kebab
+    // porque hoje o backend roda esses passos automaticamente via cron.
+    // Depois da primeira impressão, o botão vira "Reimprimir" em tom outline
+    // discreto para destacar visualmente os pedidos ainda pendentes.
+    const buildLabelAction = (order) => {
+      const printed = !!order.label_printed_at;
+      return {
+        kind: 'label',
+        label: printed ? 'Reimprimir' : 'Etiqueta',
+        cls: printed
+          ? 'border border-gray-300 dark:border-gray-600 text-gray-600 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700'
+          : 'bg-slate-700 hover:bg-slate-800 text-white',
+        icon: Printer,
+        outline: printed,
+      };
+    };
+    const primaryActionFor = (order) => {
+      if (order.status === 'cancelled') return null;
+      const canLabel = canPrintLabelFor(order);
+      if (order.marketplace === 'ml') {
+        if (canLabel && order.ml_invoice_key) return buildLabelAction(order);
+      }
+      if (order.marketplace === 'shopee') {
+        if (!order.bling_pedido_id) return { kind: 'bling-send', label: 'Gerar NFe', cls: 'bg-emerald-600 hover:bg-emerald-700 text-white', icon: Send };
+        if (canLabel && order.bling_nfe_numero) return buildLabelAction(order);
+      }
+      return null;
+    };
+    const runPrimaryAction = (order, action) => {
+      if (!action) return;
+      switch (action.kind) {
+        case 'bling-send': return sendOrderToBling(order.id);
+        case 'label': return printShippingLabel(order.id);
+      }
+    };
+
+    // Itens do sub-menu (kebab) no card — ações manuais de recuperação.
+    // Só listamos um item quando o estado do pedido justifica.
+    const cardMenuItemsFor = (order) => {
+      const items = [];
+      if (order.status !== 'cancelled') {
+        if (order.marketplace === 'ml' && !order.ml_invoice_key) {
+          items.push({ key: 'ml-fetch', label: 'Buscar NFe no ML', icon: FileText, color: 'text-yellow-600', run: () => fetchMlInvoice(order.id) });
+        }
+        if (order.bling_nfe_id && (!order.bling_nfe_chave || order.bling_nfe_status !== 'authorized')) {
+          items.push({ key: 'bling-poll', label: 'Atualizar NFe no Bling', icon: RefreshCw, color: 'text-indigo-600', run: () => pollBlingNfe(order.id) });
+        }
+        if (order.marketplace === 'shopee' && order.bling_nfe_numero && !order.nf_uploaded_at) {
+          items.push({ key: 'shopee-upload', label: 'Reenviar NFe ao Shopee', icon: Send, color: 'text-orange-600', run: () => uploadInvoiceShopee(order.id) });
+        }
+      }
+      items.push({ key: 'history', label: 'Ver histórico', icon: History, color: 'text-gray-600', run: () => openOrderHistory(order.id) });
+      if (!order.frozen) {
+        items.push({ key: 'force-hydrate', label: 'Forçar backup agora', icon: Archive, color: 'text-blue-600', run: () => forceHydrateOrder(order.id) });
+      }
+      return items;
+    };
+
+    const pipelineBadge = (stage) => {
+      const map = {
+        pending:             { label: 'Pendente',         cls: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300' },
+        awaiting_invoice:    { label: 'Aguard. nota',     cls: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300' },
+        invoice_processing:  { label: 'NFe processando',  cls: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' },
+        invoice_authorized:  { label: 'NFe autorizada',   cls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300' },
+        invoice_uploaded:    { label: 'NFe no canal',     cls: 'bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-300' },
+        ready_to_ship:       { label: 'Pronto envio',     cls: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300' },
+        shipped:             { label: 'Enviado',          cls: 'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300' },
+        delivered:           { label: 'Entregue',         cls: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300' },
+        cancelled:           { label: 'Cancelado',        cls: 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-300' },
+        error:               { label: 'Erro',             cls: 'bg-red-200 text-red-800 dark:bg-red-900/50 dark:text-red-200' },
+      };
+      return map[stage] || { label: stage || '—', cls: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300' };
+    };
+
     const getStatusInfo = (order) => {
       const s = order.status;
       const ss = order.shipping_status;
@@ -2165,14 +2633,29 @@ export const Sales = () => {
     const groupByDate = (orders) => {
       const groups = {};
       for (const o of orders) {
-        const d = o.order_date ? new Date(o.order_date).toLocaleDateString('pt-BR', { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' }) : 'Sem data';
-        if (!groups[d]) groups[d] = [];
-        groups[d].push(o);
+        let label = 'Sem data';
+        if (o.order_date) {
+          const parsed = new Date(o.order_date);
+          if (!Number.isNaN(parsed.getTime())) {
+            label = parsed.toLocaleDateString('pt-BR', { weekday: 'long', day: '2-digit', month: 'long', year: 'numeric' });
+          }
+        }
+        if (!groups[label]) groups[label] = [];
+        groups[label].push(o);
       }
       return groups;
     };
 
-    const grouped = groupByDate(mktOrders);
+    // Filtro client-side por estado de etiqueta (pendente/impressa).
+    // Mantém os dados vindos do backend intactos — só afeta o que renderiza.
+    const visibleOrders = mktLabelFilter
+      ? mktOrders.filter(o => {
+          if (mktLabelFilter === 'pending')  return !o.label_printed_at;
+          if (mktLabelFilter === 'printed')  return !!o.label_printed_at;
+          return true;
+        })
+      : mktOrders;
+    const grouped = groupByDate(visibleOrders);
     const totalPages = Math.ceil(mktTotal / MKT_PER_PAGE);
 
     const goToPage = (p) => {
@@ -2181,107 +2664,234 @@ export const Sales = () => {
     };
 
     return (
-      <div className="space-y-4">
-        <div className="flex justify-between items-center">
-          <h1 className="text-2xl font-bold text-gray-900 dark:text-white flex items-center gap-2"><Store className="w-6 h-6" /> Pedidos Marketplace</h1>
+      <div className="space-y-3">
+        {/* Cabeçalho + barra única de ações e contexto. */}
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <h1 className="text-2xl font-bold text-gray-900 dark:text-white flex items-center gap-2">
+            <Store className="w-6 h-6" /> Pedidos Marketplace
+            <span className="text-xs font-normal text-gray-400">· {mktTotal} pedidos</span>
+          </h1>
+          <div className="flex items-center gap-3 flex-wrap">
+            {mktBackupStatus && (
+              <span className="text-[11px] text-gray-500 dark:text-gray-400 flex items-center gap-1.5 whitespace-nowrap"
+                title={`Backup noturno ${mktBackupStatus.config?.enabled ? 'ativo' : 'desativado'} às ${String(mktBackupStatus.config?.hour_local ?? 0).padStart(2, '0')}:00. `
+                  + `${(mktBackupStatus.hydrated_last_24h || 0).toLocaleString('pt-BR')} hidratados nas últimas 24h · ${(mktBackupStatus.history_rows || 0).toLocaleString('pt-BR')} versões no histórico.`
+                  + (mktBackupStatus.last_run?.finished_at ? `\nÚltimo run: ${new Date(mktBackupStatus.last_run.finished_at).toLocaleString('pt-BR')}` : '')}>
+                <span className={`w-1.5 h-1.5 rounded-full ${mktBackupStatus.config?.enabled ? 'bg-blue-500' : 'bg-gray-400'}`} />
+                Backup {(mktBackupStatus.total || 0).toLocaleString('pt-BR')}
+                {mktBackupStatus.frozen > 0 && (
+                  <span className="text-gray-400">· {mktBackupStatus.frozen.toLocaleString('pt-BR')} congelados</span>
+                )}
+              </span>
+            )}
+            {mktBillingMapping.length > 0 && (
+              <a href="#" onClick={(e) => { e.preventDefault(); navigate('/configuracoes'); }}
+                className="text-[11px] text-gray-500 dark:text-gray-400 hover:text-blue-500 flex items-center gap-1.5 whitespace-nowrap"
+                title="Configurar mapeamento Bling e auto-fatura">
+                <span className="inline-flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                  Auto-fatura {mktBillingMapping.filter(m => m.auto_invoice_enabled).length}/{mktBillingMapping.length}
+                </span>
+                {mktBillingMapping.filter(m => !m.bling_account_id).length > 0 && (
+                  <span className="inline-flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                    {mktBillingMapping.filter(m => !m.bling_account_id).length} sem Bling
+                  </span>
+                )}
+                <span className="text-blue-500 hover:underline">Configurar →</span>
+              </a>
+            )}
+          </div>
         </div>
 
-        <div className="bg-white dark:bg-gray-800 rounded-xl p-4 flex flex-wrap items-end gap-3">
+        {/* Linha única: data + sync + refresh + override Bling. */}
+        <div className="bg-white dark:bg-gray-800 rounded-xl p-2.5 flex flex-wrap items-center gap-2">
           <div className="relative" ref={mktDatePickerRef}>
-            <button
-              type="button"
-              onClick={() => setMktShowDatePicker(v => !v)}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg border text-sm font-medium transition-colors h-10 ${
+            <button type="button" onClick={() => setMktShowDatePicker(v => !v)}
+              className={`flex items-center gap-1.5 px-3 h-9 rounded-lg border text-xs font-medium transition-colors ${
                 mktDateFrom && mktDateTo
                   ? 'bg-blue-50 dark:bg-blue-900/30 border-blue-300 dark:border-blue-700 text-blue-700 dark:text-blue-300'
                   : 'bg-white dark:bg-gray-800 border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700'
-              }`}
-            >
-              <Calendar className="w-4 h-4" />
+              }`}>
+              <Calendar className="w-3.5 h-3.5" />
               {mktDateFrom && mktDateTo
                 ? `${mktDateFrom.split('-').reverse().join('/')} – ${mktDateTo.split('-').reverse().join('/')}`
-                : 'Data personalizada'}
+                : 'Período'}
             </button>
             {mktShowDatePicker && (
               <DateRangePicker
                 dataInicio={mktDateFrom}
                 dataFim={mktDateTo}
                 onChange={(ini, fim) => {
-                  setMktDateFrom(ini);
-                  setMktDateTo(fim || ini);
-                  setMktShowDatePicker(false);
-                  setMktPage(1);
+                  const fimVal = fim || ini;
+                  setMktDateFrom(ini); setMktDateTo(fimVal);
+                  setMktShowDatePicker(false); setMktPage(1);
+                  fetchMktOrders(1, { dateFrom: ini, dateTo: fimVal });
                 }}
                 onClose={() => setMktShowDatePicker(false)}
               />
             )}
           </div>
-          {mktDateFrom && mktDateTo && (
-            <button type="button" onClick={() => {
-              const hoje = new Date();
-              const trintaDiasAtras = new Date(hoje);
-              trintaDiasAtras.setDate(trintaDiasAtras.getDate() - 30);
-              setMktDateFrom(trintaDiasAtras.toISOString().slice(0, 10));
-              setMktDateTo(hoje.toISOString().slice(0, 10));
-              setMktPage(1);
-            }}
-              className="text-sm text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 h-10 flex items-center">
-              Últimos 30 dias
-            </button>
-          )}
-          <button onClick={() => syncMktOrders('ml')} disabled={mktSyncing}
-            className="btn-primary text-sm h-10 flex items-center gap-1.5">
-            <RefreshCw className={`w-4 h-4 ${mktSyncing ? 'animate-spin' : ''}`} /> {mktSyncing ? 'Sincronizando...' : 'Buscar Pedidos ML'}
+
+          <div className="h-6 w-px bg-gray-200 dark:bg-gray-700" />
+
+          <button onClick={runUnifiedSearch} disabled={mktSyncing}
+            className="bg-blue-600 hover:bg-blue-700 text-white text-xs h-9 px-3 rounded-lg flex items-center gap-1.5 disabled:opacity-50"
+            title="Sincroniza pedidos e busca NFes (respeita o filtro de canal)">
+            <RefreshCw className={`w-3.5 h-3.5 ${mktSyncing ? 'animate-spin' : ''}`} /> Buscar Pedidos
           </button>
           <button onClick={() => fetchMktOrders()} disabled={mktLoading}
-            className="btn-secondary text-sm h-10 flex items-center gap-1.5">
-            <RefreshCw className={`w-4 h-4 ${mktLoading ? 'animate-spin' : ''}`} /> Atualizar Lista
+            className="btn-secondary text-xs h-9 px-3 flex items-center gap-1.5" title="Recarregar lista (sem sincronizar)">
+            <RefreshCw className={`w-3.5 h-3.5 ${mktLoading ? 'animate-spin' : ''}`} />
           </button>
+
           {blingAccounts.length > 1 && (
-            <div className="flex items-center gap-2">
-              <label className="text-xs text-gray-500 dark:text-gray-400">Enviar para:</label>
+            <div className="flex items-center gap-1.5 ml-auto">
+              <label className="text-[11px] text-gray-500 dark:text-gray-400">Bling:</label>
               <select value={activeAccountId || ''} onChange={e => setActiveAccountId(e.target.value)}
-                className="input-field text-sm h-10 w-36">
+                className="input-field text-xs h-9 py-0" title="Override manual — normalmente deixe em Auto">
+                <option value="">Auto</option>
                 {blingAccounts.map(acc => <option key={acc.id} value={acc.id}>{acc.name}</option>)}
               </select>
             </div>
           )}
-          {mktSelectedIds.length > 0 && blingAccounts.length > 0 && (
-            <button onClick={sendBulkToBling} className="bg-emerald-500/90 hover:bg-emerald-600/90 text-white text-sm px-4 h-10 rounded-lg flex items-center gap-1.5 transition-colors">
-              <Send className="w-4 h-4" /> Enviar {mktSelectedIds.length} para Bling
-            </button>
-          )}
         </div>
 
-        <div className="bg-white dark:bg-gray-800 rounded-xl p-3 flex flex-wrap items-end gap-3">
-          <div className="flex-1 min-w-[180px]">
-            <input type="text" placeholder="Buscar por nome, SKU, ID..." value={mktSearch} onChange={e => setMktSearch(e.target.value)}
-              className="input-field text-sm w-full" />
+        {/* Busca + filtros compactos em uma linha. */}
+        <div className="bg-white dark:bg-gray-800 rounded-xl p-2.5 grid grid-cols-12 gap-2 items-center">
+          <div className="col-span-12 md:col-span-5">
+            <input type="text" placeholder="Buscar por nome, SKU, ID…" value={mktSearch} onChange={handleMktSearchChange}
+              className="input-field text-sm w-full h-9" />
           </div>
-          <select value={mktStatusFilter} onChange={e => { setMktStatusFilter(e.target.value); setMktPage(1); }} className="input-field text-sm">
+          <select value={mktMarketplaceFilter} onChange={e => {
+              setMktMarketplaceFilter(e.target.value); setMktPage(1);
+              fetchMktOrders(1, { marketplace: e.target.value });
+            }} className="input-field text-xs h-9 col-span-4 md:col-span-2">
+            <option value="">Todos canais</option>
+            <option value="ml">Mercado Livre</option>
+            <option value="shopee">Shopee</option>
+          </select>
+          <select value={mktStatusFilter} onChange={e => {
+              setMktStatusFilter(e.target.value); setMktPage(1);
+              fetchMktOrders(1, { status: e.target.value });
+            }} className="input-field text-xs h-9 col-span-4 md:col-span-2">
             <option value="">Todos status</option>
-            <optgroup label="Status do Pedido">
+            <optgroup label="Pedido">
               <option value="paid">Pago</option>
               <option value="confirmed">Confirmado</option>
               <option value="cancelled">Cancelado</option>
-              <option value="payment_required">Aguard. Pagamento</option>
-              <option value="sent_to_bling">Enviado ao Bling</option>
+              <option value="payment_required">Aguard. Pgto</option>
+              <option value="sent_to_bling">No Bling</option>
               <option value="error">Erro</option>
             </optgroup>
-            <optgroup label="Status do Envio">
+            <optgroup label="Envio">
               <option value="handling">Em Manuseio</option>
-              <option value="ready_to_ship">Pronto p/ Envio</option>
+              <option value="ready_to_ship">Pronto Envio</option>
               <option value="shipped">Em Trânsito</option>
               <option value="delivered">Entregue</option>
             </optgroup>
           </select>
-          <select value={mktMarketplaceFilter} onChange={e => { setMktMarketplaceFilter(e.target.value); setMktPage(1); }} className="input-field text-sm">
-            <option value="">Todos</option>
-            <option value="ml">Mercado Livre</option>
-            <option value="shopee">Shopee</option>
+          <select value={mktPipelineFilter} onChange={e => {
+              setMktPipelineFilter(e.target.value); setMktPage(1);
+              fetchMktOrders(1, { pipeline: e.target.value });
+            }} className="input-field text-xs h-9 col-span-4 md:col-span-2" title="Estágio do integrador">
+            <option value="">Todos estágios</option>
+            <option value="pending">Pendente</option>
+            <option value="awaiting_invoice">Aguard. Nota</option>
+            <option value="invoice_processing">NFe processando</option>
+            <option value="invoice_authorized">NFe autorizada</option>
+            <option value="invoice_uploaded">NFe no canal</option>
+            <option value="ready_to_ship">Pronto envio</option>
+            <option value="shipped">Enviado</option>
+            <option value="delivered">Entregue</option>
+            <option value="cancelled">Cancelado</option>
+            <option value="error">Erro</option>
           </select>
-          <button onClick={() => { setMktSearch(''); setMktStatusFilter(''); setMktMarketplaceFilter(''); setMktPage(1); }} className="btn-secondary text-sm h-9">Limpar</button>
+          <select value={mktLabelFilter} onChange={e => setMktLabelFilter(e.target.value)}
+            className="input-field text-xs h-9 col-span-4 md:col-span-2" title="Filtrar por estado da etiqueta">
+            <option value="">Todas etiquetas</option>
+            <option value="pending">Etiqueta pendente</option>
+            <option value="printed">Etiqueta impressa</option>
+          </select>
+          <button type="button" onClick={() => {
+              if (mktSearchDebounceRef.current) { clearTimeout(mktSearchDebounceRef.current); mktSearchDebounceRef.current = null; }
+              setMktSearch(''); setMktStatusFilter(''); setMktMarketplaceFilter(''); setMktPipelineFilter(''); setMktLabelFilter('');
+              setMktPage(1);
+              fetchMktOrders(1, { search: '', status: '', marketplace: '', pipeline: '' });
+            }} className="btn-secondary text-xs h-9 col-span-12 md:col-span-1">Limpar</button>
         </div>
+
+        {/* Barra de ações em massa fixa — aparece ao selecionar, agrupa por fluxo. */}
+        {mktSelectedIds.length > 0 && (
+          <div className="sticky top-2 z-20 bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-950/50 dark:to-indigo-950/40 border border-blue-200 dark:border-blue-800/40 rounded-xl p-2 flex flex-wrap items-center gap-1.5 shadow-sm">
+            <span className="text-xs font-semibold text-blue-700 dark:text-blue-300 px-2">
+              {mktSelectedIds.length} selecionado(s)
+            </span>
+
+            {/* Grupo: NFe — só "Gerar" como ação principal (fluxo end-to-end
+                automático no backend). "Enviar NFe" fica no sub-menu como fallback
+                manual; "Buscar ML" e "Atualizar Bling" são feitos por cron. */}
+            <div className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-white/60 dark:bg-gray-800/60 relative">
+              <span className="text-[10px] uppercase font-bold text-gray-400 mr-1">NFe</span>
+              <button onClick={sendBulkToBling} className="bg-emerald-500 hover:bg-emerald-600 text-white text-[11px] px-2.5 h-7 rounded flex items-center gap-1" title="Gerar NFe no Bling e enviar ao Shopee automaticamente">
+                <Send className="w-3 h-3" /> Gerar NFe
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); setMktBulkMenuOpen(v => !v); }}
+                className="w-7 h-7 rounded flex items-center justify-center text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700"
+                title="Mais ações">
+                <MoreVertical className="w-3.5 h-3.5" />
+              </button>
+              {mktBulkMenuOpen && (
+                <>
+                  <div className="fixed inset-0 z-10" onClick={() => setMktBulkMenuOpen(false)} />
+                  <div className="absolute top-full right-0 mt-1 z-20 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md shadow-lg w-56 py-1">
+                    <button
+                      onClick={() => { setMktBulkMenuOpen(false); bulkUploadShopee(); }}
+                      className="w-full text-left px-3 py-1.5 text-[12px] text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2"
+                      title="Reenviar XML das NFes ao Shopee (fallback manual)">
+                      <Send className="w-3 h-3 text-orange-500" /> Enviar NFe ao Shopee
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Grupo: Envio */}
+            {(() => {
+              let pendingCount = 0;
+              let reprintCount = 0;
+              for (const id of mktSelectedIds) {
+                const o = mktOrders.find(x => x.id === id);
+                if (!canPrintLabelFor(o)) continue;
+                if (o.label_printed_at) reprintCount++;
+                else pendingCount++;
+              }
+              const totalEligible = pendingCount + reprintCount;
+              const mainLabel = pendingCount > 0
+                ? `Etiquetas pendentes (${pendingCount}${reprintCount ? ` +${reprintCount} reimp.` : ''})`
+                : reprintCount > 0
+                  ? `Reimprimir (${reprintCount})`
+                  : 'Etiquetas (PDF)';
+              return (
+                <div className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-white/60 dark:bg-gray-800/60">
+                  <span className="text-[10px] uppercase font-bold text-gray-400 mr-1">Envio</span>
+                  <button onClick={bulkPrintShippingLabels} disabled={totalEligible === 0}
+                    className="bg-slate-700 hover:bg-slate-800 text-white text-[11px] px-2.5 h-7 rounded flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                    title={totalEligible === 0
+                      ? 'Nenhum pedido selecionado permite imprimir etiqueta (enviados, entregues, cancelados, FULL ou sem NFe)'
+                      : `PDF único — ${pendingCount} pendente(s)${reprintCount ? ` + ${reprintCount} reimpressão(ões)` : ''}`}>
+                    <Printer className="w-3 h-3" /> {mainLabel}
+                  </button>
+                </div>
+              );
+            })()}
+
+            <button onClick={() => setMktSelectedIds([])} className="text-[11px] text-gray-600 dark:text-gray-300 px-2 h-7 hover:underline ml-auto">
+              Limpar seleção
+            </button>
+          </div>
+        )}
 
         {mktLoading ? (
           <div className="text-center py-12 text-gray-500 dark:text-gray-400">
@@ -2290,21 +2900,29 @@ export const Sales = () => {
         ) : mktOrders.length === 0 ? (
           <div className="text-center py-12 text-gray-500 dark:text-gray-400">
             <ShoppingCart className="w-12 h-12 mx-auto mb-3 opacity-30" />
-            <p>Nenhum pedido encontrado. Clique em "Buscar Pedidos ML" para sincronizar.</p>
+            <p>Nenhum pedido encontrado. Clique em "Buscar Pedidos" para sincronizar.</p>
+          </div>
+        ) : visibleOrders.length === 0 ? (
+          <div className="text-center py-12 text-gray-500 dark:text-gray-400">
+            <Printer className="w-12 h-12 mx-auto mb-3 opacity-30" />
+            <p>Nenhum pedido corresponde ao filtro de etiqueta selecionado.</p>
+            <button onClick={() => setMktLabelFilter('')} className="mt-3 text-xs text-blue-600 dark:text-blue-400 hover:underline">
+              Limpar filtro de etiqueta
+            </button>
           </div>
         ) : (
           <div className="space-y-6">
-            <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+            <label className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400 cursor-pointer select-none">
               <input type="checkbox"
-                checked={mktSelectedIds.length === mktOrders.filter(o => !o.bling_pedido_id).length && mktOrders.filter(o => !o.bling_pedido_id).length > 0}
+                checked={mktSelectedIds.length === visibleOrders.length && visibleOrders.length > 0}
                 onChange={e => {
-                  if (e.target.checked) setMktSelectedIds(mktOrders.filter(o => !o.bling_pedido_id).map(o => o.id));
+                  if (e.target.checked) setMktSelectedIds(visibleOrders.map(o => o.id));
                   else setMktSelectedIds([]);
                 }}
-                className="rounded" />
-              <span>Selecionar todos pendentes ({mktOrders.filter(o => !o.bling_pedido_id).length})</span>
+                className="w-5 h-5 rounded cursor-pointer accent-blue-500" />
+              <span>Selecionar todos visíveis ({visibleOrders.length})</span>
               <span className="ml-auto font-medium">{mktTotal} pedidos</span>
-            </div>
+            </label>
 
             {Object.entries(grouped).map(([dateLabel, orders]) => (
               <div key={dateLabel}>
@@ -2321,58 +2939,157 @@ export const Sales = () => {
                     const isSending = mktSending.has(order.id);
                     const addr = order.shipping_address || {};
                     const buyerDisplay = order.buyer_name || order.buyer_nickname || 'N/A';
-                    const orderTime = order.order_date ? new Date(order.order_date).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : '';
+                    const orderTime = (() => {
+                      if (!order.order_date) return '';
+                      const d = new Date(order.order_date);
+                      return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+                    })();
                     const mktLogo = mktLogos[order.marketplace] || mktLogos.ml;
                     const isExpanded = mktExpandedId === order.id;
 
-                    const nfStatus = order.nf_manual_number ? 'manual' : (order.bling_nfe_numero || order.bling_nfe_id) ? 'bling' : null;
+                    const action = primaryActionFor(order);
+                    const ActionIcon = action?.icon;
+                    const nfeOk = !!(order.bling_nfe_chave || order.ml_invoice_key || order.nf_manual_number);
+                    const nfeUploadedShopee = !!order.nf_uploaded_at;
+                    const canPrintLabel = canPrintLabelFor(order);
+                    const pipelineInfo = order.pipeline_stage ? pipelineBadge(order.pipeline_stage) : null;
+                    const labelInfo = labelInfoFor(order);
 
                     return (
                       <div key={order.id} className="relative">
                         <div className={`absolute -left-[31px] top-3 w-3 h-3 rounded-full ${statusInfo.dotColor} ring-2 ring-white dark:ring-gray-900`} />
 
                         <div className={`bg-white dark:bg-gray-800 rounded-xl border ${order.status === 'cancelled' ? 'border-red-200 dark:border-red-800/40 opacity-70' : isSent ? 'border-green-200 dark:border-green-800/50' : 'border-gray-200 dark:border-gray-700'} overflow-hidden transition-shadow hover:shadow-lg`}>
-                          {/* Header */}
-                          <div className="flex items-center justify-between px-4 py-2 bg-gray-50 dark:bg-gray-800/80 border-b border-gray-100 dark:border-gray-700/50 cursor-pointer"
+                          {/* Header enxuto: identidade → status único → indicadores compactos → valor/ações. */}
+                          <div className="flex items-center justify-between px-3 py-2 bg-gray-50 dark:bg-gray-800/80 border-b border-gray-100 dark:border-gray-700/50 cursor-pointer gap-3"
                             onClick={() => toggleOrderDetail(order.id)}>
-                            <div className="flex items-center gap-3 text-xs">
-                              {!isSent && order.status !== 'cancelled' && (
-                                <input type="checkbox" checked={mktSelectedIds.includes(order.id)}
-                                  onClick={e => e.stopPropagation()}
-                                  onChange={e => {
-                                    if (e.target.checked) setMktSelectedIds(prev => [...prev, order.id]);
-                                    else setMktSelectedIds(prev => prev.filter(id => id !== order.id));
-                                  }} className="rounded" />
+                            <div className="flex items-center gap-2 text-xs min-w-0">
+                              {order.status !== 'cancelled' && (
+                                <span className="p-1 -m-1 flex items-center flex-shrink-0" onClick={e => e.stopPropagation()}>
+                                  <input type="checkbox" checked={mktSelectedIds.includes(order.id)}
+                                    onClick={e => e.stopPropagation()}
+                                    onChange={e => {
+                                      if (e.target.checked) setMktSelectedIds(prev => [...prev, order.id]);
+                                      else setMktSelectedIds(prev => prev.filter(id => id !== order.id));
+                                    }} className="w-5 h-5 rounded cursor-pointer accent-blue-500" />
+                                </span>
                               )}
-                              <span className="font-mono text-gray-500 dark:text-gray-400">#{order.marketplace_order_id}</span>
-                              {orderTime && <span className="text-gray-400">{orderTime}</span>}
+                              <img src={mktLogo} alt={order.marketplace} className="w-4 h-4 rounded-sm object-contain flex-shrink-0" title={order.marketplace === 'ml' ? 'Mercado Livre' : 'Shopee'} />
+                              <span className="font-mono text-gray-500 dark:text-gray-400 truncate" title={`#${order.marketplace_order_id}`}>#{order.marketplace_order_id}</span>
+                              {orderTime && <span className="text-gray-400 flex-shrink-0">{orderTime}</span>}
                               {order.account_name && (
-                                <span className="px-2 py-0.5 rounded-md text-[10px] font-medium bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 border border-gray-200/60 dark:border-gray-600">
+                                <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 flex-shrink-0 max-w-[130px] truncate" title={order.account_name}>
                                   {order.account_name}
                                 </span>
                               )}
-                              <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold inline-flex items-center gap-1.5 ${statusInfo.bgColor} ${statusInfo.textColor}`}>
-                                <img src={mktLogo} alt="" className="w-3.5 h-3.5 rounded-sm object-contain" />
-                                {statusInfo.label}
-                              </span>
-                              {nfStatus && (
-                                <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold inline-flex items-center gap-1 ${nfStatus === 'manual' ? 'bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400' : 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400'}`}>
-                                  <FileText className="w-3 h-3" />
-                                  {nfStatus === 'manual' ? `NF ${order.nf_manual_number}` : `NF-e ${order.bling_nfe_numero || 'Gerada'}`}
+
+                              {/* Status primário unificado: prioriza pipeline quando disponível. */}
+                              {pipelineInfo ? (
+                                <span
+                                  className={`px-2 py-0.5 rounded-full text-[10px] font-semibold inline-flex items-center gap-1 flex-shrink-0 ${pipelineInfo.cls} ${order.pipeline_last_error ? 'ring-1 ring-red-300 dark:ring-red-700/60' : ''}`}
+                                  title={order.pipeline_last_error
+                                    ? `Último erro: ${order.pipeline_last_error}${order.pipeline_last_error_at ? ` (${new Date(order.pipeline_last_error_at).toLocaleString('pt-BR')})` : ''}`
+                                    : `${statusInfo.label} · ${pipelineInfo.label}`}
+                                >
+                                  {order.pipeline_last_error && <AlertCircle className="w-3 h-3" />}
+                                  {pipelineInfo.label}
+                                </span>
+                              ) : (
+                                <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold flex-shrink-0 ${statusInfo.bgColor} ${statusInfo.textColor}`}>
+                                  {statusInfo.label}
+                                </span>
+                              )}
+
+                              {/* Chip de estado da etiqueta — separa impressos de pendentes. */}
+                              {labelInfo && (
+                                <span
+                                  className={`px-2 py-0.5 rounded-full text-[10px] font-semibold inline-flex items-center gap-1 flex-shrink-0 ${labelInfo.cls}`}
+                                  title={labelInfo.at
+                                    ? `Impressa em ${new Date(labelInfo.at).toLocaleString('pt-BR')}${labelInfo.by ? ` (${labelInfo.by})` : ''}`
+                                    : labelInfo.label}
+                                >
+                                  <Printer className="w-3 h-3" />
+                                  {labelInfo.label}
+                                </span>
+                              )}
+
+                              {/* Indicadores compactos (ícone + tooltip, sem poluir) */}
+                              {nfeOk && (
+                                <span className="inline-flex items-center gap-0.5 text-emerald-600 dark:text-emerald-400 flex-shrink-0"
+                                  title={`NFe ${order.bling_nfe_numero || order.ml_invoice_number || order.nf_manual_number || ''}${order.bling_nfe_chave || order.ml_invoice_key ? ` · ${(order.bling_nfe_chave || order.ml_invoice_key).slice(-6)}` : ''}`}>
+                                  <FileText className="w-3.5 h-3.5" />
+                                </span>
+                              )}
+                              {nfeUploadedShopee && (
+                                <span className="inline-flex items-center text-teal-600 dark:text-teal-400 flex-shrink-0"
+                                  title={`NFe enviada ao Shopee em ${new Date(order.nf_uploaded_at).toLocaleString('pt-BR')}`}>
+                                  <Send className="w-3.5 h-3.5" />
+                                </span>
+                              )}
+                              {order.shipping_tracking && (
+                                <span className="inline-flex items-center text-cyan-600 dark:text-cyan-400 flex-shrink-0"
+                                  title={`Rastreio: ${order.shipping_tracking}`}>
+                                  <Truck className="w-3.5 h-3.5" />
                                 </span>
                               )}
                             </div>
-                            <div className="flex items-center gap-2">
+
+                            <div className="flex items-center gap-2 flex-shrink-0">
                               <span className="text-sm font-bold text-green-600 dark:text-green-400">R$ {(order.total_amount || 0).toFixed(2)}</span>
-                              {!isSent && order.status !== 'cancelled' ? (
-                                <button onClick={e => { e.stopPropagation(); sendOrderToBling(order.id); }} disabled={isSending}
-                                  className="bg-green-600 hover:bg-green-700 text-white text-[11px] px-2.5 py-1 rounded-lg flex items-center gap-1 transition-colors disabled:opacity-50">
-                                  {isSending ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Send className="w-3 h-3" />}
-                                  {isSending ? '...' : 'Bling'}
+
+                              {/* Ação primária (um único botão, contextual). */}
+                              {action && (
+                                <button onClick={e => { e.stopPropagation(); runPrimaryAction(order, action); }} disabled={isSending}
+                                  className={`${action.cls} text-[11px] px-2.5 h-7 rounded flex items-center gap-1 transition-colors disabled:opacity-50`}
+                                  title={action.label}>
+                                  {isSending ? <RefreshCw className="w-3 h-3 animate-spin" /> : <ActionIcon className="w-3 h-3" />}
+                                  {action.label}
                                 </button>
-                              ) : isSent ? (
-                                <span className="text-[10px] text-gray-400 font-mono">{order.bling_pedido_id}</span>
-                              ) : null}
+                              )}
+
+                              {/* Etiqueta como botão-ícone (só quando faz sentido e não é a ação primária). */}
+                              {canPrintLabel && action?.kind !== 'label' && (
+                                <button onClick={e => { e.stopPropagation(); printShippingLabel(order.id); }} disabled={isSending}
+                                  className="bg-white dark:bg-gray-700 hover:bg-slate-100 dark:hover:bg-slate-600 border border-gray-200 dark:border-gray-600 text-gray-700 dark:text-gray-200 text-[11px] w-7 h-7 rounded flex items-center justify-center transition-colors disabled:opacity-50"
+                                  title="Imprimir etiqueta de envio">
+                                  <Printer className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+
+                              {/* Kebab menu com ações manuais de recuperação (NFe ML, Bling poll, Reenviar Shopee) */}
+                              {(() => {
+                                const menuItems = cardMenuItemsFor(order);
+                                if (!menuItems.length) return null;
+                                const isOpen = mktCardMenuOpen === order.id;
+                                return (
+                                  <div className="relative">
+                                    <button onClick={e => { e.stopPropagation(); setMktCardMenuOpen(isOpen ? null : order.id); }}
+                                      className="bg-white dark:bg-gray-700 hover:bg-slate-100 dark:hover:bg-slate-600 border border-gray-200 dark:border-gray-600 text-gray-700 dark:text-gray-200 w-7 h-7 rounded flex items-center justify-center transition-colors"
+                                      title="Mais ações">
+                                      <MoreVertical className="w-3.5 h-3.5" />
+                                    </button>
+                                    {isOpen && (
+                                      <>
+                                        <div className="fixed inset-0 z-10" onClick={e => { e.stopPropagation(); setMktCardMenuOpen(null); }} />
+                                        <div className="absolute top-full right-0 mt-1 z-20 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md shadow-lg w-56 py-1">
+                                          {menuItems.map(mi => {
+                                            const Icon = mi.icon;
+                                            return (
+                                              <button key={mi.key}
+                                                onClick={e => { e.stopPropagation(); setMktCardMenuOpen(null); mi.run(); }}
+                                                disabled={isSending}
+                                                className="w-full text-left px-3 py-1.5 text-[12px] text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2 disabled:opacity-50">
+                                                <Icon className={`w-3 h-3 ${mi.color}`} /> {mi.label}
+                                              </button>
+                                            );
+                                          })}
+                                        </div>
+                                      </>
+                                    )}
+                                  </div>
+                                );
+                              })()}
+
                               {isExpanded ? <ChevronUp className="w-4 h-4 text-gray-400" /> : <ChevronDown className="w-4 h-4 text-gray-400" />}
                             </div>
                           </div>
@@ -2390,7 +3107,11 @@ export const Sales = () => {
                                 } catch {}
                               }
                               if (!thumb && invMatch?.image) thumb = invMatch.image;
-                              const displayTitle = item.title && item.title !== 'null' ? item.title : (invMatch?.title || 'Produto sem título');
+                              // Priorizamos o título do estoque (quando o SKU casa) para
+                              // manter a nomenclatura interna. Marketplace vira fallback.
+                              const stockTitle = invMatch?.title || invMatch?.descricao || null;
+                              const fallbackTitle = (item.title && item.title !== 'null') ? item.title : null;
+                              const displayTitle = stockTitle || fallbackTitle || 'Produto sem título';
                               const displaySku = item.sku || invMatch?.sku || '';
                               let varAttrs = item.variation_attributes || [];
                               if (!varAttrs.length && item.variation_attributes_json) {
@@ -2398,13 +3119,13 @@ export const Sales = () => {
                               }
 
                               return (
-                                <div key={idx} className="flex gap-4 items-start">
+                                <div key={idx} className="flex gap-5 items-start">
                                   <div className="flex-shrink-0">
                                     {thumb ? (
-                                      <img src={thumb} alt="" className="w-20 h-20 rounded-lg object-cover bg-gray-100 dark:bg-gray-700 shadow-sm" />
+                                      <img src={thumb} alt="" className="w-28 h-28 rounded-lg object-cover bg-gray-100 dark:bg-gray-700 shadow-sm" />
                                     ) : (
-                                      <div className="w-20 h-20 rounded-lg bg-gray-100 dark:bg-gray-700 flex items-center justify-center">
-                                        <Package className="w-7 h-7 text-gray-300 dark:text-gray-600" />
+                                      <div className="w-28 h-28 rounded-lg bg-gray-100 dark:bg-gray-700 flex items-center justify-center">
+                                        <Package className="w-9 h-9 text-gray-300 dark:text-gray-600" />
                                       </div>
                                     )}
                                   </div>
@@ -2427,21 +3148,21 @@ export const Sales = () => {
 
                             {items.length === 0 && <p className="text-xs text-gray-400 italic">Sem itens registrados</p>}
 
-                            <div className="flex flex-wrap gap-x-4 gap-y-1 pt-2 border-t border-gray-100 dark:border-gray-700/50 text-[11px] text-gray-500 dark:text-gray-400">
-                              <span>Comprador: <strong className="text-gray-700 dark:text-gray-200">{buyerDisplay}</strong></span>
-                              {addr.city && <span>{addr.city}{addr.state ? ` - ${addr.state}` : ''}</span>}
-                              {addr.zip_code && <span>CEP: {addr.zip_code}</span>}
-                              {order.payment_method && <span>Pag: {order.payment_method}</span>}
-                              {order.shipping_cost > 0 && <span>Frete: R$ {order.shipping_cost.toFixed(2)}</span>}
-                              {order.shipping_tracking && (
-                                <span className="flex items-center gap-1"><Truck className="w-3 h-3" /> {order.shipping_tracking}</span>
-                              )}
-                            </div>
-                            <div className="mt-2 flex justify-center cursor-pointer group" onClick={() => toggleOrderDetail(order.id)}>
-                              <span className="text-[10px] text-blue-500 dark:text-blue-400 group-hover:text-blue-700 flex items-center gap-1 py-1">
-                                {isExpanded ? <><ChevronUp className="w-3 h-3" /> Recolher detalhes</> : <><Eye className="w-3 h-3" /> Clique para ver detalhes completos</>}
-                              </span>
-                            </div>
+                            {/* Rodapé enxuto: comprador + cidade/UF. Rastreio e pagamento já estão em ícones/header ou no painel expandido. */}
+                            {!isExpanded && (
+                              <div className="flex items-center justify-between gap-3 pt-2 mt-1 border-t border-gray-100 dark:border-gray-700/50 text-[11px] text-gray-500 dark:text-gray-400">
+                                <div className="flex items-center gap-3 min-w-0">
+                                  <span className="truncate"><strong className="text-gray-700 dark:text-gray-200">{buyerDisplay}</strong>{addr.city ? ` · ${addr.city}${addr.state ? `/${addr.state}` : ''}` : ''}</span>
+                                  {order.shipping_tracking && (
+                                    <span className="flex items-center gap-1 font-mono text-cyan-600 dark:text-cyan-400"><Truck className="w-3 h-3" /> {order.shipping_tracking}</span>
+                                  )}
+                                </div>
+                                <button onClick={() => toggleOrderDetail(order.id)}
+                                  className="text-[10px] text-blue-500 dark:text-blue-400 hover:text-blue-700 flex items-center gap-1 flex-shrink-0">
+                                  <Eye className="w-3 h-3" /> Detalhes
+                                </button>
+                              </div>
+                            )}
                           </div>
 
                           {/* Expanded Detail Panel */}
@@ -2452,298 +3173,243 @@ export const Sales = () => {
                                   <RefreshCw className="w-5 h-5 animate-spin mr-2" /> Carregando detalhes...
                                 </div>
                               ) : mktDetailData ? (
-                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-0 divide-y md:divide-y-0 md:divide-x divide-gray-200 dark:divide-gray-700">
-                                  {/* Pedido */}
-                                  <div className="p-4">
-                                    <h4 className="text-xs font-bold text-gray-700 dark:text-gray-200 uppercase tracking-wide flex items-center gap-1.5 mb-3">
-                                      <ShoppingCart className="w-3.5 h-3.5" /> Pedido
-                                    </h4>
-                                    <div className="space-y-2 text-xs text-gray-600 dark:text-gray-300">
-                                      <div className="flex justify-between">
-                                        <span className="text-gray-400">Canal:</span>
-                                        <span className="font-medium flex items-center gap-1">
-                                          <img src={mktLogo} alt="" className="w-4 h-4" />
-                                          {order.marketplace === 'ml' ? 'Mercado Livre' : order.marketplace === 'shopee' ? 'Shopee' : order.marketplace}
-                                        </span>
-                                      </div>
-                                      <div className="flex justify-between">
-                                        <span className="text-gray-400">Pedido:</span>
-                                        <span className="font-mono font-medium">{safe(mktDetailData.marketplace_order_id)}</span>
-                                      </div>
-                                      {mktDetailData.pack_id && (
-                                        <div className="flex justify-between">
-                                          <span className="text-gray-400">Pack:</span>
-                                          <span className="font-mono">{safe(mktDetailData.pack_id)}</span>
-                                        </div>
-                                      )}
-                                      <div className="flex justify-between">
-                                        <span className="text-gray-400">Status:</span>
-                                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${statusInfo.bgColor} ${statusInfo.textColor}`}>{statusInfo.label}</span>
-                                      </div>
-                                      <div className="flex justify-between">
-                                        <span className="text-gray-400">Data:</span>
-                                        <span>{mktDetailData.order_date ? new Date(mktDetailData.order_date).toLocaleString('pt-BR') : '-'}</span>
-                                      </div>
-                                    </div>
-                                  </div>
-
-                                  {/* Pagamento */}
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-0 divide-y md:divide-y-0 md:divide-x divide-gray-200 dark:divide-gray-700">
+                                  {/* Coluna 1: Pagamento (os únicos dados que não aparecem nem no header nem no card). */}
                                   <div className="p-4">
                                     <h4 className="text-xs font-bold text-gray-700 dark:text-gray-200 uppercase tracking-wide flex items-center gap-1.5 mb-3">
                                       <CreditCard className="w-3.5 h-3.5" /> Pagamento
                                     </h4>
-                                    <div className="space-y-2 text-xs text-gray-600 dark:text-gray-300">
-                                      {mktDetailData.payment_id && (
-                                        <div className="flex justify-between">
-                                          <span className="text-gray-400">ID Pgto:</span>
-                                          <span className="font-mono">{safe(mktDetailData.payment_id)}</span>
-                                        </div>
-                                      )}
-                                      <div className="flex justify-between">
-                                        <span className="text-gray-400">Total:</span>
-                                        <span className="font-bold text-green-600 dark:text-green-400">R$ {(mktDetailData.payment_total || mktDetailData.total_amount || 0).toFixed(2)}</span>
-                                      </div>
+                                    <div className="space-y-1.5 text-xs text-gray-600 dark:text-gray-300">
+                                      <div className="flex justify-between"><span className="text-gray-400">Total:</span>
+                                        <span className="font-bold text-green-600 dark:text-green-400">R$ {(mktDetailData.payment_total || mktDetailData.total_amount || 0).toFixed(2)}</span></div>
                                       {mktDetailData.shipping_cost > 0 && (
-                                        <div className="flex justify-between">
-                                          <span className="text-gray-400">Frete:</span>
-                                          <span>R$ {mktDetailData.shipping_cost.toFixed(2)}</span>
-                                        </div>
+                                        <div className="flex justify-between"><span className="text-gray-400">Frete:</span>
+                                          <span>R$ {mktDetailData.shipping_cost.toFixed(2)}</span></div>
                                       )}
-                                      <div className="flex justify-between">
-                                        <span className="text-gray-400">Método:</span>
-                                        <span className="capitalize">{safe(mktDetailData.payment_method) || '-'}</span>
-                                      </div>
+                                      <div className="flex justify-between"><span className="text-gray-400">Método:</span>
+                                        <span className="capitalize">{safe(mktDetailData.payment_method) || '-'}</span></div>
                                       {mktDetailData.payment_installments > 1 && (
-                                        <div className="flex justify-between">
-                                          <span className="text-gray-400">Parcelas:</span>
-                                          <span>{mktDetailData.payment_installments}x</span>
-                                        </div>
+                                        <div className="flex justify-between"><span className="text-gray-400">Parcelas:</span>
+                                          <span>{mktDetailData.payment_installments}x</span></div>
+                                      )}
+                                      {mktDetailData.payment_status && (
+                                        <div className="flex justify-between"><span className="text-gray-400">Status Pgto:</span>
+                                          <span className="capitalize">{safe(mktDetailData.payment_status)}</span></div>
                                       )}
                                       {mktDetailData.payment_date && (
-                                        <div className="flex justify-between">
-                                          <span className="text-gray-400">Data aprovação:</span>
-                                          <span>{new Date(mktDetailData.payment_date).toLocaleString('pt-BR')}</span>
-                                        </div>
+                                        <div className="flex justify-between"><span className="text-gray-400">Aprovado em:</span>
+                                          <span>{new Date(mktDetailData.payment_date).toLocaleString('pt-BR')}</span></div>
                                       )}
-                                      <div className="flex justify-between">
-                                        <span className="text-gray-400">Status:</span>
-                                        <span className="capitalize">{safe(mktDetailData.payment_status) || '-'}</span>
-                                      </div>
+                                      {mktDetailData.payment_id && (
+                                        <div className="flex justify-between pt-1 border-t border-gray-100 dark:border-gray-700/50"><span className="text-gray-400">ID Pgto:</span>
+                                          <span className="font-mono text-[10px]">{safe(mktDetailData.payment_id)}</span></div>
+                                      )}
+                                      {mktDetailData.pack_id && (
+                                        <div className="flex justify-between"><span className="text-gray-400">Pack ML:</span>
+                                          <span className="font-mono text-[10px]">{safe(mktDetailData.pack_id)}</span></div>
+                                      )}
                                     </div>
                                   </div>
 
-                                  {/* Comprador + Envio */}
+                                  {/* Coluna 2: Comprador + Endereço (destaque no endereço, que é o dado "de ação"). */}
                                   <div className="p-4">
                                     <h4 className="text-xs font-bold text-gray-700 dark:text-gray-200 uppercase tracking-wide flex items-center gap-1.5 mb-3">
                                       <User className="w-3.5 h-3.5" /> Comprador
                                     </h4>
-                                    <div className="space-y-2 text-xs text-gray-600 dark:text-gray-300">
-                                      {mktDetailData.buyer_nickname && (
-                                        <div className="flex justify-between">
-                                          <span className="text-gray-400">Nickname:</span>
-                                          <span className="font-medium">@{safe(mktDetailData.buyer_nickname)}</span>
-                                        </div>
-                                      )}
-                                      <div className="flex justify-between">
-                                        <span className="text-gray-400">Nome:</span>
-                                        <span className="font-medium">{safe(mktDetailData.buyer_name) || '-'}</span>
-                                      </div>
+                                    <div className="space-y-1.5 text-xs text-gray-600 dark:text-gray-300">
+                                      <div className="flex justify-between gap-2"><span className="text-gray-400">Nome:</span>
+                                        <span className="font-medium text-right truncate" title={safe(mktDetailData.buyer_name)}>
+                                          {safe(mktDetailData.buyer_name) || safe(mktDetailData.buyer_nickname) || '-'}
+                                        </span></div>
                                       {mktDetailData.buyer_doc && (
-                                        <div className="flex justify-between">
-                                          <span className="text-gray-400">CPF/CNPJ:</span>
-                                          <span className="font-mono">{safe(mktDetailData.buyer_doc)}</span>
-                                        </div>
+                                        <div className="flex justify-between"><span className="text-gray-400">CPF/CNPJ:</span>
+                                          <span className="font-mono flex items-center gap-1">{safe(mktDetailData.buyer_doc)}
+                                            <button onClick={() => { navigator.clipboard.writeText(mktDetailData.buyer_doc); toast.success('Copiado!'); }}
+                                              className="text-blue-500 hover:text-blue-700"><Copy className="w-3 h-3" /></button>
+                                          </span></div>
                                       )}
                                       {mktDetailData.buyer_phone && (
-                                        <div className="flex justify-between">
-                                          <span className="text-gray-400">Telefone:</span>
-                                          <span>{safe(mktDetailData.buyer_phone)}</span>
-                                        </div>
+                                        <div className="flex justify-between"><span className="text-gray-400">Telefone:</span>
+                                          <span>{safe(mktDetailData.buyer_phone)}</span></div>
                                       )}
                                       {mktDetailData.buyer_email && (
-                                        <div className="flex justify-between">
-                                          <span className="text-gray-400">Email:</span>
-                                          <span className="truncate max-w-[140px]" title={safe(mktDetailData.buyer_email)}>{safe(mktDetailData.buyer_email)}</span>
-                                        </div>
-                                      )}
-                                      {mktDetailData.shipping_address && (
-                                        <>
-                                          <div className="pt-2 mt-2 border-t border-gray-200 dark:border-gray-700">
-                                            <h5 className="text-[10px] font-bold text-gray-400 uppercase flex items-center gap-1 mb-1.5">
-                                              <MapPin className="w-3 h-3" /> Endereço
-                                            </h5>
-                                          </div>
-                                          <div className="text-[11px] leading-relaxed">
-                                            <p>{safe(mktDetailData.shipping_address.street)}{mktDetailData.shipping_address.number ? `, ${safe(mktDetailData.shipping_address.number)}` : ''}</p>
-                                            {mktDetailData.shipping_address.complement && <p>{safe(mktDetailData.shipping_address.complement)}</p>}
-                                            <p>{safe(mktDetailData.shipping_address.neighborhood)}</p>
-                                            <p>{safe(mktDetailData.shipping_address.city)} - {safe(mktDetailData.shipping_address.state)}</p>
-                                            {mktDetailData.shipping_address.zip_code && <p>CEP: {safe(mktDetailData.shipping_address.zip_code)}</p>}
-                                          </div>
-                                        </>
+                                        <div className="flex justify-between gap-2"><span className="text-gray-400">Email:</span>
+                                          <span className="truncate text-right" title={safe(mktDetailData.buyer_email)}>{safe(mktDetailData.buyer_email)}</span></div>
                                       )}
                                     </div>
+                                    {mktDetailData.shipping_address && (
+                                      <div className="mt-3 pt-3 border-t border-gray-200 dark:border-gray-700">
+                                        <div className="flex items-center justify-between mb-1.5">
+                                          <h5 className="text-[10px] font-bold text-gray-400 uppercase flex items-center gap-1">
+                                            <MapPin className="w-3 h-3" /> Endereço de entrega
+                                          </h5>
+                                          <button
+                                            onClick={() => {
+                                              const a = mktDetailData.shipping_address;
+                                              const fullAddr = [
+                                                `${safe(a.street)}${a.number ? `, ${safe(a.number)}` : ''}`,
+                                                safe(a.complement),
+                                                safe(a.neighborhood),
+                                                `${safe(a.city)} - ${safe(a.state)}`,
+                                                a.zip_code ? `CEP: ${safe(a.zip_code)}` : ''
+                                              ].filter(Boolean).join('\n');
+                                              navigator.clipboard.writeText(fullAddr);
+                                              toast.success('Endereço copiado!');
+                                            }}
+                                            className="text-blue-500 hover:text-blue-700" title="Copiar endereço completo"><Copy className="w-3 h-3" /></button>
+                                        </div>
+                                        <div className="text-[12px] leading-relaxed text-gray-700 dark:text-gray-200 bg-gray-50 dark:bg-gray-800/60 rounded-md p-2">
+                                          <p className="font-medium">{safe(mktDetailData.shipping_address.street)}{mktDetailData.shipping_address.number ? `, ${safe(mktDetailData.shipping_address.number)}` : ''}</p>
+                                          {mktDetailData.shipping_address.complement && <p className="text-gray-500">{safe(mktDetailData.shipping_address.complement)}</p>}
+                                          <p>{safe(mktDetailData.shipping_address.neighborhood)}</p>
+                                          <p>{safe(mktDetailData.shipping_address.city)} - {safe(mktDetailData.shipping_address.state)}</p>
+                                          {mktDetailData.shipping_address.zip_code && <p className="font-mono text-[11px] text-gray-500">CEP: {safe(mktDetailData.shipping_address.zip_code)}</p>}
+                                        </div>
+                                      </div>
+                                    )}
                                   </div>
 
-                                  {/* NF / Opções */}
-                                  <div className="p-4">
-                                    <h4 className="text-xs font-bold text-gray-700 dark:text-gray-200 uppercase tracking-wide flex items-center gap-1.5 mb-3">
-                                      <FileText className="w-3.5 h-3.5" /> NF / Opções
-                                    </h4>
-                                    <div className="space-y-2">
-                                      {/* Shipping info */}
-                                      {(mktDetailData.shipping_tracking || mktDetailData.shipping_method) && (
-                                        <div className="bg-white dark:bg-gray-800 rounded-lg p-2 border border-gray-200 dark:border-gray-700 mb-2">
-                                          <h5 className="text-[10px] font-bold text-gray-400 uppercase flex items-center gap-1 mb-1.5">
-                                            <Truck className="w-3 h-3" /> Envio
-                                          </h5>
-                                          <div className="text-[11px] space-y-1 text-gray-600 dark:text-gray-300">
-                                            {mktDetailData.shipping_method && <p>Método: {safe(mktDetailData.shipping_method)}</p>}
-                                            {mktDetailData.shipping_status && <p>Status: <span className="capitalize">{safe(mktDetailData.shipping_status)}</span></p>}
-                                            {mktDetailData.shipping_tracking && (
-                                              <p className="flex items-center gap-1">Rastreio: <span className="font-mono font-medium">{safe(mktDetailData.shipping_tracking)}</span>
-                                                <button onClick={() => { navigator.clipboard.writeText(mktDetailData.shipping_tracking); toast.success('Copiado!'); }} className="text-blue-500 hover:text-blue-700"><Copy className="w-3 h-3" /></button>
-                                              </p>
-                                            )}
+                                  {/* Coluna 3: Envio, NFe e ações. */}
+                                  <div className="p-4 space-y-3">
+                                    {/* Envio: rastreio em destaque. */}
+                                    <div>
+                                      <h4 className="text-xs font-bold text-gray-700 dark:text-gray-200 uppercase tracking-wide flex items-center gap-1.5 mb-2">
+                                        <Truck className="w-3.5 h-3.5" /> Envio
+                                      </h4>
+                                      {mktDetailData.shipping_tracking ? (
+                                        <div className="bg-cyan-50 dark:bg-cyan-900/20 border border-cyan-200 dark:border-cyan-800/40 rounded-lg p-2">
+                                          <div className="text-[10px] text-cyan-700 dark:text-cyan-400 font-semibold uppercase mb-1">Código de rastreio</div>
+                                          <div className="flex items-center gap-1.5">
+                                            <span className="font-mono font-bold text-sm text-gray-800 dark:text-gray-100 break-all">{safe(mktDetailData.shipping_tracking)}</span>
+                                            <button onClick={() => { navigator.clipboard.writeText(mktDetailData.shipping_tracking); toast.success('Copiado!'); }}
+                                              className="text-cyan-600 hover:text-cyan-800 flex-shrink-0"><Copy className="w-3.5 h-3.5" /></button>
                                           </div>
-                                        </div>
-                                      )}
-
-                                      {/* NF-e section - dynamic based on search result */}
-                                      {mktNfeLoading ? (
-                                        <div className="bg-gray-50 dark:bg-gray-800 rounded-lg p-3 border border-gray-200 dark:border-gray-700">
-                                          <div className="flex items-center gap-2 text-xs text-gray-500 py-2">
-                                            <RefreshCw className="w-3 h-3 animate-spin" /> Buscando NF-e no Bling...
-                                          </div>
-                                        </div>
-                                      ) : mktNfeData?.nfe ? (
-                                        <div className="bg-green-50 dark:bg-green-900/20 rounded-lg p-3 border border-green-200 dark:border-green-800/40">
-                                          <h5 className="text-[10px] font-bold text-green-700 dark:text-green-400 uppercase flex items-center gap-1 mb-2">
-                                            <FileText className="w-3 h-3" /> Nota Fiscal Eletrônica
-                                          </h5>
-                                          <div className="space-y-1.5 text-[11px] text-gray-700 dark:text-gray-300">
-                                            {mktNfeData.bling_pedido_id && (
-                                              <div className="flex justify-between">
-                                                <span className="text-gray-400">Pedido Bling:</span>
-                                                <span className="font-mono font-medium">#{safe(mktNfeData.bling_pedido_id)}</span>
-                                              </div>
-                                            )}
-                                            <div className="flex justify-between">
-                                              <span className="text-gray-400">NF-e Nº:</span>
-                                              <span className="font-bold text-green-700 dark:text-green-400">{safe(mktNfeData.nfe.numero)}</span>
-                                            </div>
-                                            {mktNfeData.nfe.serie && (
-                                              <div className="flex justify-between">
-                                                <span className="text-gray-400">Série:</span>
-                                                <span>{safe(mktNfeData.nfe.serie)}</span>
-                                              </div>
-                                            )}
-                                            <div className="flex justify-between">
-                                              <span className="text-gray-400">Situação:</span>
-                                              <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
-                                                [5, 6].includes(Number(mktNfeData.nfe.situacao)) ? 'bg-green-200 dark:bg-green-800/50 text-green-800 dark:text-green-300'
-                                                : [2, 4, 7].includes(Number(mktNfeData.nfe.situacao)) ? 'bg-red-200 dark:bg-red-800/50 text-red-800 dark:text-red-300'
-                                                : 'bg-yellow-200 dark:bg-yellow-800/50 text-yellow-800 dark:text-yellow-300'
-                                              }`}>{safe(mktNfeData.nfe.situacaoLabel)}</span>
-                                            </div>
-                                            {mktNfeData.nfe.valorNota != null && (
-                                              <div className="flex justify-between">
-                                                <span className="text-gray-400">Valor:</span>
-                                                <span className="font-bold">R$ {Number(mktNfeData.nfe.valorNota || 0).toFixed(2)}</span>
-                                              </div>
-                                            )}
-                                            {mktNfeData.nfe.dataEmissao && (
-                                              <div className="flex justify-between">
-                                                <span className="text-gray-400">Emissão:</span>
-                                                <span>{safe(mktNfeData.nfe.dataEmissao)}{mktNfeData.nfe.horaEmissao ? ` ${safe(mktNfeData.nfe.horaEmissao)}` : ''}</span>
-                                              </div>
-                                            )}
-                                            {mktNfeData.nfe.naturezaOperacao && (
-                                              <div className="flex justify-between">
-                                                <span className="text-gray-400">Natureza:</span>
-                                                <span className="text-right max-w-[150px] truncate" title={safe(mktNfeData.nfe.naturezaOperacao)}>{safe(mktNfeData.nfe.naturezaOperacao)}</span>
-                                              </div>
-                                            )}
-                                            {mktNfeData.nfe.chaveAcesso && (
-                                              <div className="pt-1.5 mt-1.5 border-t border-green-200 dark:border-green-700">
-                                                <span className="text-[10px] text-gray-400 block mb-0.5">Chave de Acesso:</span>
-                                                <div className="flex items-center gap-1">
-                                                  <span className="font-mono text-[9px] break-all leading-tight">{safe(mktNfeData.nfe.chaveAcesso)}</span>
-                                                  <button onClick={() => { navigator.clipboard.writeText(safe(mktNfeData.nfe.chaveAcesso)); toast.success('Chave copiada!'); }}
-                                                    className="flex-shrink-0 text-blue-500 hover:text-blue-700"><Copy className="w-3 h-3" /></button>
-                                                </div>
-                                              </div>
-                                            )}
-                                            <div className="flex gap-1.5 pt-2 mt-1">
-                                              {mktNfeData.nfe.linkDanfe && (
-                                                <a href={safe(mktNfeData.nfe.linkDanfe)} target="_blank" rel="noopener noreferrer"
-                                                  className="flex-1 bg-green-600 hover:bg-green-700 text-white text-[10px] py-1.5 rounded-lg flex items-center justify-center gap-1 transition-colors">
-                                                  <Printer className="w-3 h-3" /> DANFE
-                                                </a>
-                                              )}
-                                              {mktNfeData.nfe.xml && (
-                                                <a href={safe(mktNfeData.nfe.xml)} target="_blank" rel="noopener noreferrer"
-                                                  className="flex-1 bg-blue-600 hover:bg-blue-700 text-white text-[10px] py-1.5 rounded-lg flex items-center justify-center gap-1 transition-colors">
-                                                  <ExternalLink className="w-3 h-3" /> XML
-                                                </a>
-                                              )}
-                                            </div>
-                                          </div>
-                                        </div>
-                                      ) : mktNfeData?.pedido ? (
-                                        <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-2 border border-blue-200 dark:border-blue-800/40 mb-1">
-                                          <div className="text-[11px] text-blue-700 dark:text-blue-400">
-                                            <p className="font-semibold">Bling: #{safe(mktNfeData.bling_pedido_id || mktNfeData.pedido.id)}</p>
-                                            <p className="text-[10px] text-gray-400 mt-0.5">Pedido encontrado no Bling mas sem NF-e vinculada</p>
+                                          <div className="text-[11px] text-gray-600 dark:text-gray-300 mt-1 space-x-2">
+                                            {mktDetailData.shipping_method && <span>{safe(mktDetailData.shipping_method)}</span>}
+                                            {mktDetailData.shipping_status && <span className="capitalize">· {safe(mktDetailData.shipping_status)}</span>}
                                           </div>
                                         </div>
                                       ) : (
-                                        <>
-                                          {/* NF Manual form - only shown when no Bling NF-e found */}
-                                          <div className="bg-white dark:bg-gray-800 rounded-lg p-2.5 border border-gray-200 dark:border-gray-700">
-                                            <h5 className="text-[10px] font-bold text-purple-600 dark:text-purple-400 uppercase flex items-center gap-1 mb-2">
-                                              <FileText className="w-3 h-3" /> NF Manual
-                                            </h5>
-                                            <div className="space-y-1.5">
-                                              <input type="text" placeholder="Nº NF" value={mktNfForm.nf_manual_number}
-                                                onChange={e => setMktNfForm(f => ({ ...f, nf_manual_number: e.target.value }))}
-                                                className="w-full input-field text-xs py-1 px-2" />
-                                              <input type="text" placeholder="Série" value={mktNfForm.nf_manual_serie}
-                                                onChange={e => setMktNfForm(f => ({ ...f, nf_manual_serie: e.target.value }))}
-                                                className="w-full input-field text-xs py-1 px-2" />
-                                              <input type="text" placeholder="Chave NF-e (44 dígitos)" value={mktNfForm.nf_manual_key}
-                                                onChange={e => setMktNfForm(f => ({ ...f, nf_manual_key: e.target.value }))}
-                                                className="w-full input-field text-xs py-1 px-2" />
-                                              <input type="date" value={mktNfForm.nf_manual_date}
-                                                onChange={e => setMktNfForm(f => ({ ...f, nf_manual_date: e.target.value }))}
-                                                className="w-full input-field text-xs py-1 px-2" />
-                                              <button onClick={() => saveNfManual(order.id)} disabled={mktNfSaving}
-                                                className="w-full bg-purple-600 hover:bg-purple-700 text-white text-xs py-1.5 rounded-lg flex items-center justify-center gap-1 transition-colors disabled:opacity-50">
-                                                {mktNfSaving ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
-                                                {mktNfSaving ? 'Salvando...' : 'Salvar NF Manual'}
-                                              </button>
-                                            </div>
-                                          </div>
-                                        </>
+                                        <p className="text-[11px] text-gray-400 italic">Sem código de rastreio ainda</p>
                                       )}
-
-                                      {/* Action buttons */}
-                                      <div className="flex flex-wrap gap-1.5 pt-1">
-                                        {!isSent && order.status !== 'cancelled' && (
-                                          <button onClick={e => { e.stopPropagation(); sendOrderToBling(order.id); }} disabled={isSending}
-                                            className="flex-1 min-w-[80px] bg-green-600 hover:bg-green-700 text-white text-[10px] py-1.5 rounded-lg flex items-center justify-center gap-1 transition-colors disabled:opacity-50">
-                                            <Send className="w-3 h-3" /> ENVIAR BLING
-                                          </button>
-                                        )}
-                                        {order.marketplace === 'ml' && order.marketplace_order_id && (
-                                          <a href={`https://www.mercadolivre.com.br/vendas/${order.marketplace_order_id}/detalhe`}
-                                            target="_blank" rel="noopener noreferrer"
-                                            className="flex-1 min-w-[80px] bg-yellow-500 hover:bg-yellow-600 text-white text-[10px] py-1.5 rounded-lg flex items-center justify-center gap-1 transition-colors">
-                                            <ExternalLink className="w-3 h-3" /> VER NO ML
-                                          </a>
-                                        )}
-                                      </div>
                                     </div>
+
+                                    {/* NFe: status dinâmico. */}
+                                    <div>
+                                      <h4 className="text-xs font-bold text-gray-700 dark:text-gray-200 uppercase tracking-wide flex items-center gap-1.5 mb-2">
+                                        <FileText className="w-3.5 h-3.5" /> Nota Fiscal
+                                      </h4>
+                                      {mktNfeLoading ? (
+                                        <div className="flex items-center gap-2 text-xs text-gray-500 py-2">
+                                          <RefreshCw className="w-3 h-3 animate-spin" /> Buscando no Bling...
+                                        </div>
+                                      ) : mktNfeData?.nfe ? (
+                                        <div className="bg-green-50 dark:bg-green-900/20 rounded-lg p-2.5 border border-green-200 dark:border-green-800/40">
+                                          <div className="flex items-start justify-between gap-2 mb-1.5">
+                                            <div>
+                                              <div className="text-[10px] text-gray-400 uppercase">NF-e Nº</div>
+                                              <div className="font-bold text-green-700 dark:text-green-400 text-sm">{safe(mktNfeData.nfe.numero)}{mktNfeData.nfe.serie ? `/${safe(mktNfeData.nfe.serie)}` : ''}</div>
+                                            </div>
+                                            <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                                              [5, 6].includes(Number(mktNfeData.nfe.situacao)) ? 'bg-green-200 dark:bg-green-800/50 text-green-800 dark:text-green-300'
+                                              : [2, 4, 7].includes(Number(mktNfeData.nfe.situacao)) ? 'bg-red-200 dark:bg-red-800/50 text-red-800 dark:text-red-300'
+                                              : 'bg-yellow-200 dark:bg-yellow-800/50 text-yellow-800 dark:text-yellow-300'
+                                            }`}>{safe(mktNfeData.nfe.situacaoLabel)}</span>
+                                          </div>
+                                          <div className="text-[11px] text-gray-600 dark:text-gray-300 space-y-0.5">
+                                            {mktNfeData.nfe.valorNota != null && <div>Valor: <strong>R$ {Number(mktNfeData.nfe.valorNota || 0).toFixed(2)}</strong></div>}
+                                            {mktNfeData.nfe.dataEmissao && <div>Emissão: {safe(mktNfeData.nfe.dataEmissao)}{mktNfeData.nfe.horaEmissao ? ` ${safe(mktNfeData.nfe.horaEmissao)}` : ''}</div>}
+                                          </div>
+                                          {mktNfeData.nfe.chaveAcesso && (
+                                            <div className="pt-1.5 mt-1.5 border-t border-green-200 dark:border-green-700/50">
+                                              <div className="flex items-center gap-1">
+                                                <span className="font-mono text-[9px] break-all leading-tight flex-1">{safe(mktNfeData.nfe.chaveAcesso)}</span>
+                                                <button onClick={() => { navigator.clipboard.writeText(safe(mktNfeData.nfe.chaveAcesso)); toast.success('Chave copiada!'); }}
+                                                  className="flex-shrink-0 text-blue-500 hover:text-blue-700"><Copy className="w-3 h-3" /></button>
+                                              </div>
+                                            </div>
+                                          )}
+                                          <div className="flex gap-1.5 pt-2">
+                                            {mktNfeData.nfe.linkDanfe && (
+                                              <a href={safe(mktNfeData.nfe.linkDanfe)} target="_blank" rel="noopener noreferrer"
+                                                className="flex-1 bg-green-600 hover:bg-green-700 text-white text-[10px] py-1.5 rounded flex items-center justify-center gap-1">
+                                                <Printer className="w-3 h-3" /> DANFE
+                                              </a>
+                                            )}
+                                            {mktNfeData.nfe.xml && (
+                                              <a href={safe(mktNfeData.nfe.xml)} target="_blank" rel="noopener noreferrer"
+                                                className="flex-1 bg-blue-600 hover:bg-blue-700 text-white text-[10px] py-1.5 rounded flex items-center justify-center gap-1">
+                                                <ExternalLink className="w-3 h-3" /> XML
+                                              </a>
+                                            )}
+                                          </div>
+                                        </div>
+                                      ) : order.ml_invoice_key ? (
+                                        <div className="bg-green-50 dark:bg-green-900/20 rounded-lg p-2.5 border border-green-200 dark:border-green-800/40">
+                                          <div className="text-[10px] text-gray-400 uppercase mb-0.5">NF-e ML</div>
+                                          <div className="font-bold text-green-700 dark:text-green-400 text-sm">Nº {safe(order.ml_invoice_number)}</div>
+                                          <div className="flex items-center gap-1 mt-1">
+                                            <span className="font-mono text-[9px] break-all flex-1">{safe(order.ml_invoice_key)}</span>
+                                            <button onClick={() => { navigator.clipboard.writeText(order.ml_invoice_key); toast.success('Chave copiada!'); }}
+                                              className="text-blue-500 hover:text-blue-700"><Copy className="w-3 h-3" /></button>
+                                          </div>
+                                        </div>
+                                      ) : mktNfeData?.pedido ? (
+                                        <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-2 border border-blue-200 dark:border-blue-800/40">
+                                          <p className="text-[11px] text-blue-700 dark:text-blue-400 font-semibold">Pedido Bling #{safe(mktNfeData.bling_pedido_id || mktNfeData.pedido.id)}</p>
+                                          <p className="text-[10px] text-gray-400 mt-0.5">Sem NF-e vinculada ainda</p>
+                                        </div>
+                                      ) : (
+                                        <p className="text-[11px] text-gray-400 italic">NFe ainda não emitida</p>
+                                      )}
+                                    </div>
+
+                                    {/* Ações: etiqueta + links externos. O botão da ação primária já está no header. */}
+                                    <div className="flex flex-wrap gap-1.5 pt-1">
+                                      {canPrintLabel && (
+                                        <button onClick={e => { e.stopPropagation(); printShippingLabel(order.id); }} disabled={isSending}
+                                          className="flex-1 min-w-[100px] bg-slate-700 hover:bg-slate-800 text-white text-[11px] py-1.5 rounded flex items-center justify-center gap-1 disabled:opacity-50">
+                                          <Printer className="w-3 h-3" /> Etiqueta
+                                        </button>
+                                      )}
+                                      {order.marketplace === 'ml' && order.marketplace_order_id && (
+                                        <a href={`https://www.mercadolivre.com.br/vendas/${order.marketplace_order_id}/detalhe`}
+                                          target="_blank" rel="noopener noreferrer"
+                                          className="flex-1 min-w-[100px] bg-yellow-500 hover:bg-yellow-600 text-white text-[11px] py-1.5 rounded flex items-center justify-center gap-1">
+                                          <ExternalLink className="w-3 h-3" /> Ver no ML
+                                        </a>
+                                      )}
+                                    </div>
+
+                                    {/* NF manual colapsada — só para casos excepcionais. */}
+                                    {!mktNfeData?.nfe && !order.ml_invoice_key && (
+                                      <details open={mktNfManualOpen} onToggle={e => setMktNfManualOpen(e.target.open)} className="pt-2 border-t border-gray-200 dark:border-gray-700/60">
+                                        <summary className="text-[11px] text-gray-500 dark:text-gray-400 cursor-pointer select-none hover:text-purple-600 dark:hover:text-purple-400 flex items-center gap-1">
+                                          <ChevronDown className="w-3 h-3" /> Inserir NF manual (caso excepcional)
+                                        </summary>
+                                        <div className="mt-2 space-y-1.5">
+                                          <div className="grid grid-cols-2 gap-1.5">
+                                            <input type="text" placeholder="Nº NF" value={mktNfForm.nf_manual_number}
+                                              onChange={e => setMktNfForm(f => ({ ...f, nf_manual_number: e.target.value }))}
+                                              className="input-field text-xs py-1 px-2" />
+                                            <input type="text" placeholder="Série" value={mktNfForm.nf_manual_serie}
+                                              onChange={e => setMktNfForm(f => ({ ...f, nf_manual_serie: e.target.value }))}
+                                              className="input-field text-xs py-1 px-2" />
+                                          </div>
+                                          <input type="text" placeholder="Chave NF-e (44 dígitos)" value={mktNfForm.nf_manual_key}
+                                            onChange={e => setMktNfForm(f => ({ ...f, nf_manual_key: e.target.value }))}
+                                            className="w-full input-field text-xs py-1 px-2 font-mono" />
+                                          <input type="date" value={mktNfForm.nf_manual_date}
+                                            onChange={e => setMktNfForm(f => ({ ...f, nf_manual_date: e.target.value }))}
+                                            className="w-full input-field text-xs py-1 px-2" />
+                                          <button onClick={() => saveNfManual(order.id)} disabled={mktNfSaving}
+                                            className="w-full bg-purple-600 hover:bg-purple-700 text-white text-xs py-1.5 rounded flex items-center justify-center gap-1 disabled:opacity-50">
+                                            {mktNfSaving ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Save className="w-3 h-3" />}
+                                            {mktNfSaving ? 'Salvando...' : 'Salvar NF Manual'}
+                                          </button>
+                                        </div>
+                                      </details>
+                                    )}
                                   </div>
                                 </div>
                               ) : (
@@ -2799,6 +3465,73 @@ export const Sales = () => {
                 <span className="text-xs text-gray-500 dark:text-gray-400 ml-2">Página {mktPage} de {totalPages}</span>
               </div>
             )}
+          </div>
+        )}
+
+        {/* Modal: histórico versionado do pedido (snapshots do backup) */}
+        {mktHistoryOpenFor && (
+          <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={() => setMktHistoryOpenFor(null)}>
+            <div className="bg-white dark:bg-gray-800 rounded-xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200 dark:border-gray-700">
+                <div className="flex items-center gap-2">
+                  <History className="w-5 h-5 text-gray-500" />
+                  <h3 className="text-base font-semibold text-gray-900 dark:text-white">Histórico do pedido</h3>
+                </div>
+                <button onClick={() => setMktHistoryOpenFor(null)} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto p-4">
+                {mktHistoryLoading ? (
+                  <div className="text-sm text-gray-500 dark:text-gray-400 text-center py-8">Carregando histórico…</div>
+                ) : mktHistoryRows.length === 0 ? (
+                  <div className="text-sm text-gray-500 dark:text-gray-400 text-center py-8">Nenhuma versão registrada ainda. O backup noturno ou uma próxima atualização gerará a primeira entrada.</div>
+                ) : (
+                  <ul className="space-y-2">
+                    {mktHistoryRows.map((row) => {
+                      const when = row.snapshot_at ? new Date(row.snapshot_at + 'Z').toLocaleString('pt-BR') : '—';
+                      const src = {
+                        live_sync: { label: 'Sync ao vivo', cls: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' },
+                        nightly:   { label: 'Backup noturno', cls: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300' },
+                        manual:    { label: 'Manual', cls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300' },
+                        final_freeze: { label: 'Snapshot final', cls: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300' },
+                      }[row.source] || { label: row.source || '—', cls: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300' };
+                      const fields = Array.isArray(row.changed_fields) ? row.changed_fields.filter(f => f !== '__items__') : [];
+                      const itemsChanged = Array.isArray(row.changed_fields) && row.changed_fields.includes('__items__');
+                      return (
+                        <li key={row.id} className="border border-gray-200 dark:border-gray-700 rounded-lg p-3 bg-gray-50 dark:bg-gray-900/40">
+                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <span className="text-xs font-medium text-gray-700 dark:text-gray-300">{when}</span>
+                            <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${src.cls}`}>{src.label}</span>
+                          </div>
+                          {(fields.length > 0 || itemsChanged) && (
+                            <div className="mt-2 text-xs text-gray-600 dark:text-gray-400">
+                              <span className="font-medium">Campos alterados:</span>{' '}
+                              {fields.slice(0, 12).join(', ')}
+                              {fields.length > 12 && <span> +{fields.length - 12}</span>}
+                              {itemsChanged && <span className="ml-1 text-indigo-600 dark:text-indigo-300">(itens)</span>}
+                            </div>
+                          )}
+                          {row.snapshot_hash && (
+                            <div className="mt-1 text-[10px] text-gray-400 font-mono truncate">#{row.snapshot_hash.slice(0, 16)}</div>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+              <div className="px-5 py-3 border-t border-gray-200 dark:border-gray-700 flex items-center justify-between gap-2">
+                <span className="text-xs text-gray-500 dark:text-gray-400">
+                  {mktHistoryRows.length > 0 ? `${mktHistoryRows.length} versão(ões)` : ''}
+                </span>
+                <button
+                  onClick={() => { forceHydrateOrder(mktHistoryOpenFor); }}
+                  className="text-xs px-3 py-1.5 rounded-lg bg-blue-500 hover:bg-blue-600 text-white flex items-center gap-1.5">
+                  <Archive className="w-3.5 h-3.5" /> Forçar backup agora
+                </button>
+              </div>
+            </div>
           </div>
         )}
       </div>

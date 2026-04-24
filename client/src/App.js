@@ -9,6 +9,7 @@ import { Login } from './components/Login';
 import { AdminPanel } from './components/AdminPanel';
 import { Anuncios } from './components/Anuncios';
 import { Atendimento } from './components/Atendimento';
+import { FactoryDeliveries } from './components/FactoryDeliveries';
 import { FloatingQuestions } from './components/FloatingQuestions';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ToastProvider } from './components/Toast';
@@ -74,6 +75,16 @@ function AppRoutes({ user, setUser, toggleDarkMode, userSettings }) {
     );
   }
 
+  // Conta Fábrica: apenas registrar entregas de lotes (sem sidebar completa).
+  if (user.role === 5) {
+    return (
+      <Routes>
+        <Route path="/factory/*" element={<FactoryDeliveries user={user} onLogout={() => logout(setUser)} />} />
+        <Route path="*" element={<Navigate to="/factory" replace />} />
+      </Routes>
+    );
+  }
+
   return (
     <div className="flex h-screen bg-gray-100 dark:bg-gray-900">
       <Sidebar user={user} onLogout={() => logout(setUser)} toggleDarkMode={toggleDarkMode} userSettings={userSettings} />
@@ -87,8 +98,9 @@ function AppRoutes({ user, setUser, toggleDarkMode, userSettings }) {
             {(user.role >= 2) && <Route path="/sales" element={<Sales />} />}
             {(user.role >= 2) && <Route path="/anuncios" element={<Anuncios user={user} />} />}
             {(user.role >= 2) && <Route path="/atendimento" element={<Atendimento user={user} />} />}
-            {(user.role >= 3) && <Route path="/sales-report" element={<SalesReportPage user={user} />} />}
+            {(user.role >= 2) && <Route path="/sales-report" element={<SalesReportPage user={user} />} />}
             {(user.role >= 4) && <Route path="/external-apis" element={<ExternalAPIs />} />}
+            {(user.role >= 4) && <Route path="/configuracoes" element={<ExternalAPIs />} />}
             {user.role === 4 && <Route path="/status" element={<Status />} />}
             <Route path="*" element={<Navigate to="/" />} />
           </Routes>

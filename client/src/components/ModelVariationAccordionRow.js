@@ -1,5 +1,6 @@
 import React from 'react';
 import { ChevronUp, ChevronRight, Star, Trash2 } from 'lucide-react';
+import { InventoryAutocomplete } from './InventoryAutocomplete';
 
 /** Normaliza para comparar nome digitado com o catálogo ML (acentos, maiúsculas). */
 function normalizeMatch(s) {
@@ -322,6 +323,19 @@ export function ModelVariationAccordionRow({
                 u[vi] = { ...u[vi], price: parseFloat(e.target.value) || 0 };
                 setModelEditModal((prev) => ({ ...prev, _variations: u }));
               }} className="w-full px-2 py-1.5 border border-gray-200 dark:border-gray-600 rounded text-sm bg-white dark:bg-gray-700" />
+            </div>
+            <div className="sm:col-span-2">
+              <label className="text-[10px] text-gray-500 block mb-0.5">Vincular ao estoque (variação)</label>
+              <InventoryAutocomplete
+                sizeHint="sm"
+                value={v.inventory_id || null}
+                onChange={(id) => {
+                  const u = [...(modelEditModal._variations || [])];
+                  u[vi] = { ...u[vi], inventory_id: id || null };
+                  setModelEditModal((prev) => ({ ...prev, _variations: u }));
+                }}
+                placeholder="Buscar item do estoque…"
+              />
             </div>
           </div>
           {vi === 0 ? null : (
