@@ -146,6 +146,16 @@ Topics diferentes são ignorados no webhook e continuam sendo tratados por outro
 
 Para ligar/desligar o webhook sem mexer na assinatura no painel do ML, use `ML_WEBHOOK_ENABLED=0` / `1`. A autenticidade é validada cruzando `user_id` com os `ml_accounts` conectados — notificações de outros sellers são ignoradas.
 
+### Stream de eventos em tempo real (SSE)
+
+`GET /api/events/stream` é um canal SSE que empurra eventos do servidor para qualquer cliente conectado. A tela **Pedidos Marketplace** assina esse canal automaticamente enquanto está aberta e, ao receber `order_synced` (emitido sempre que um pedido é atualizado no DB — via webhook ML, cron delta ou sync manual), relê a lista imediatamente. Os ciclos de polling do cliente (Auto 1/5/15 min) continuam ativos como fallback caso o stream caia.
+
+Eventos atuais:
+- `hello`: handshake inicial após conexão.
+- `order_synced`: pedido foi atualizado. Payload: `{ marketplace, marketplaceOrderId, accountId, localId, source, isNew }`. Só é emitido em mudança real (snapshot_hash diferente) para não spammar o canal.
+
+A autenticação usa o mesmo JWT do app, passado via query string (`?token=...`) já que `EventSource` não permite custom headers.
+
 ## 📦 Sistema de Estoque
 
 ### Estrutura dos Dados

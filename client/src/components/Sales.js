@@ -882,6 +882,59 @@ export const Sales = () => {
     };
   }, [activeTab, mktAutoInterval, fetchMktOrders, runAutoSyncDelta]);
 
+  // SSE push: assina /api/events/stream enquanto a aba Marketplace está
+  // aberta. Quando o servidor emite `order_synced` (webhook ML, cron delta,
+  // sync manual — qualquer caminho que atualize um pedido no DB), relemos a
+  // lista em seguida. Debounce pra coalescer bursts (ex.: sync em lote).
+  // Respeita o filtro de canal: se o usuário está olhando só ML, ignora
+  // eventos da Shopee e vice-versa.
+  useEffect(() => {
+    if (activeTab !== 'marketplace') return;
+    let es = null;
+    let debounceTimer = null;
+    let closed = false;
+
+    const scheduleRefresh = () => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        if (closed) return;
+        if (document.hidden) return;
+        if (mktAutoInFlightRef.current) return;
+        fetchMktOrders();
+        setMktLastAutoSync(new Date());
+      }, 800);
+    };
+
+    try {
+      const token = localStorage.getItem('token');
+      const streamUrl = (window.location.origin || '') + '/api/events/stream' + (token ? `?token=${encodeURIComponent(token)}` : '');
+      es = new EventSource(streamUrl);
+      es.addEventListener('order_synced', (evt) => {
+        try {
+          const data = JSON.parse(evt.data || '{}');
+          if (mktMarketplaceFilter && data.marketplace && data.marketplace !== mktMarketplaceFilter) return;
+          if (data.isNew) {
+            setMktNewOrdersBadge(prev => prev + 1);
+            setTimeout(() => setMktNewOrdersBadge(0), 8000);
+          }
+          scheduleRefresh();
+        } catch (_) { /* ignore payload malformado */ }
+      });
+      es.onerror = () => {
+        // EventSource reconecta automaticamente — só logamos uma vez.
+        if (!closed) console.warn('[SSE] conexão caiu; reconectando...');
+      };
+    } catch (err) {
+      console.warn('[SSE] falha abrindo EventSource:', err?.message);
+    }
+
+    return () => {
+      closed = true;
+      if (debounceTimer) clearTimeout(debounceTimer);
+      if (es) { try { es.close(); } catch (_) { /* noop */ } }
+    };
+  }, [activeTab, mktMarketplaceFilter, fetchMktOrders]);
+
   useEffect(() => {
     if (!mktShowDatePicker) return;
     const handleClickOutside = (e) => {

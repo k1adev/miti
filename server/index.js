@@ -2300,8 +2300,9 @@ app.use('/api', (req, res, next) => {
   if (PUBLIC_ROUTE_PATTERNS.some(re => re.test(fullPath))) {
     return next();
   }
-  // EventSource não envia Authorization header; aceitar token na query para GET em notas-expedidas
-  if (req.method === 'GET' && fullPath.startsWith('/api/notas-expedidas')) {
+  // EventSource não envia Authorization header; aceitar token na query para
+  // GETs em rotas SSE conhecidas.
+  if (req.method === 'GET' && (fullPath.startsWith('/api/notas-expedidas') || fullPath.startsWith('/api/events'))) {
     const token = (req.query.token || '').trim() || (req.headers['authorization'] || '').split(' ')[1];
     if (token) {
       return jwt.verify(token, SECRET, (err, user) => {
@@ -4520,6 +4521,50 @@ app.get('/api/ml/callback', async (req, res) => {
     console.error('[ML] Callback error:', err.response?.data || err.message);
     res.status(500).send('Erro ao autorizar com Mercado Livre.');
   }
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SSE: canal de eventos genérico do servidor → clientes (push em tempo real)
+// ──────────────────────────────────────────────────────────────────────────────
+// A tela Pedidos Marketplace abre um EventSource em /api/events/stream e
+// recebe notificações "order_synced" assim que um pedido é atualizado no DB
+// (webhook ML, cron delta, sync manual). Com isso a UI reage em segundos —
+// os ciclos de polling do cliente (30s/1m/5m/15m) viram fallback pra caso o
+// stream caia. Qualquer outra feature pode publicar nesse canal reaproveitando
+// broadcastEvent(type, data).
+const sseClients = new Set();
+let sseIdSeq = 0;
+
+function sseWriteEvent(res, event, data) {
+  try {
+    if (event) res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(data ?? {})}\n\n`);
+  } catch (_) { /* cliente provavelmente fechou */ }
+}
+
+function broadcastEvent(event, data) {
+  for (const client of sseClients) {
+    sseWriteEvent(client.res, event, data);
+  }
+}
+
+app.get('/api/events/stream', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-store, max-age=0, must-revalidate, no-transform');
+  res.setHeader('X-Accel-Buffering', 'no');
+  if (res.flushHeaders) res.flushHeaders();
+  const id = ++sseIdSeq;
+  const client = { id, res };
+  sseClients.add(client);
+  sseWriteEvent(res, 'hello', { id, ts: Date.now() });
+  const ping = setInterval(() => {
+    try { res.write(`: ping ${Date.now()}\n\n`); } catch (_) { /* noop */ }
+  }, 25_000);
+  req.on('close', () => {
+    clearInterval(ping);
+    sseClients.delete(client);
+    try { res.end(); } catch (_) { /* noop */ }
+  });
 });
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -12749,6 +12794,21 @@ async function hydrateAndRecord(orderId, source, prevHash) {
     setImmediate(() => {
       computeOrderCostsSafe(row, items).catch(() => { /* best-effort */ });
     });
+  }
+  // Notifica clientes conectados por SSE quando o snapshot do pedido muda.
+  // Só emite em mudança real (result.inserted) para não spammar o canal com
+  // syncs que não alteraram nada. É best-effort — nunca derruba o sync.
+  if (result.inserted) {
+    try {
+      broadcastEvent('order_synced', {
+        marketplace: row.marketplace,
+        marketplaceOrderId: row.marketplace_order_id,
+        accountId: row.account_id,
+        localId: row.id,
+        source: source || 'live_sync',
+        isNew: !prevHash,
+      });
+    } catch (_) { /* best-effort */ }
   }
   return result;
 }
