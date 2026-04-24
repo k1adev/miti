@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   RefreshCw, CheckCircle, LogIn, Link2, XCircle, Plus, Trash2, Globe, X, ChevronDown, ChevronUp,
   Settings, ShieldCheck, Terminal, Archive, Clock, Play, Save, Search, AlertTriangle, Eraser, Copy, Activity, Database,
-  Landmark,
+  Landmark, Radio,
 } from 'lucide-react';
 import axios from 'axios';
 import { useToast } from './Toast';
@@ -249,6 +249,43 @@ export const ExternalAPIs = () => {
             Sem conta Bling mapeada, os pedidos desta conta precisam ser enviados manualmente em "Pedidos Marketplace".
           </p>
         )}
+      </div>
+    );
+  };
+
+  // Bloco "Sincronização automática de pedidos" — controla participação
+  // desta conta no cron delta do servidor E no processamento de webhooks
+  // (ML/Shopee push). Quando desligado, a conta só sincroniza via botão
+  // "Buscar Pedidos" na tela Pedidos Marketplace.
+  const OrderSyncSettingsBlock = ({ marketplace, account }) => {
+    const key = `${marketplace}-${account.id}`;
+    const saving = !!savingMapping[key];
+    const enabled = account.auto_sync_orders_enabled == null ? true : !!account.auto_sync_orders_enabled;
+    return (
+      <div className="mt-3 pt-3 border-t dark:border-gray-700">
+        <div className="flex items-center gap-2 mb-2">
+          <Radio className={`w-3.5 h-3.5 ${enabled ? 'text-emerald-500' : 'text-gray-400'}`} />
+          <span className="text-xs font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wide">Sincronização automática de pedidos</span>
+        </div>
+        <label className="flex items-start gap-2 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={enabled}
+            disabled={saving}
+            onChange={(e) => saveBillingMapping(marketplace, account.id, {
+              auto_sync_orders_enabled: e.target.checked ? 1 : 0,
+            })}
+            className="w-4 h-4 rounded border-gray-300 mt-0.5"
+          />
+          <div className="text-xs text-gray-700 dark:text-gray-300 leading-snug">
+            <div className="font-medium">Participa do sync automático</div>
+            <div className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">
+              Quando ligado, esta conta participa do cron <code className="text-[10px] font-mono bg-gray-100 dark:bg-gray-800 px-1 rounded">ORDERS_AUTO_INTERVAL_MIN</code> e
+              processa webhooks ({marketplace === 'ml' ? 'orders_v2 / shipments' : 'códigos 3 / 4 / 15'}) em tempo real.
+              Desligar pausa toda sincronização automática — o botão "Buscar Pedidos" na tela Pedidos Marketplace continua funcionando.
+            </div>
+          </div>
+        </label>
       </div>
     );
   };
@@ -903,6 +940,8 @@ export const ExternalAPIs = () => {
 
                   <BillingMappingBlock marketplace="ml" account={acc} />
 
+                  <OrderSyncSettingsBlock marketplace="ml" account={acc} />
+
                   <TaxSettingsBlock marketplace="ml" account={acc} />
 
                   <div className="flex flex-wrap gap-2 mt-3 pt-3 border-t dark:border-gray-700">
@@ -1000,6 +1039,8 @@ export const ExternalAPIs = () => {
                   </form>
 
                   <BillingMappingBlock marketplace="shopee" account={acc} />
+
+                  <OrderSyncSettingsBlock marketplace="shopee" account={acc} />
 
                   <TaxSettingsBlock marketplace="shopee" account={acc} />
 

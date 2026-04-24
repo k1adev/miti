@@ -1355,6 +1355,13 @@ function initDatabase() {
     addColumnSafe('ALTER TABLE ml_accounts ADD COLUMN auto_sync_enabled INTEGER DEFAULT 0');
     addColumnSafe('ALTER TABLE shopee_accounts ADD COLUMN last_items_sync_at DATETIME');
     addColumnSafe('ALTER TABLE shopee_accounts ADD COLUMN auto_sync_enabled INTEGER DEFAULT 0');
+    // Controle por conta do sync automático de PEDIDOS (cron delta + webhooks).
+    // Default 1 preserva o comportamento anterior (toda conta conectada
+    // participa). Quando 0, a conta é ignorada pelo cron ORDERS_AUTO_INTERVAL_MIN
+    // e os webhooks (ML/Shopee) não processam notificações dela. Sync manual
+    // via tela continua funcionando normalmente.
+    addColumnSafe('ALTER TABLE ml_accounts ADD COLUMN auto_sync_orders_enabled INTEGER DEFAULT 1');
+    addColumnSafe('ALTER TABLE shopee_accounts ADD COLUMN auto_sync_orders_enabled INTEGER DEFAULT 1');
     // Integrador de pedidos (M1) — vincula conta ML/Shopee à conta Bling usada
     // para faturar e habilita o worker de auto-fatura por conta.
     addColumnSafe('ALTER TABLE ml_accounts ADD COLUMN bling_account_id INTEGER');
@@ -4403,6 +4410,7 @@ app.get('/api/ml/accounts', (req, res) => {
                  bling_account_id,
                  COALESCE(auto_invoice_enabled, 0) AS auto_invoice_enabled,
                  COALESCE(auto_sync_enabled, 0) AS auto_sync_enabled,
+                 COALESCE(auto_sync_orders_enabled, 1) AS auto_sync_orders_enabled,
                  last_items_sync_at, tax_pct,
                  created_at, updated_at FROM ml_accounts ORDER BY id`, (err, rows) => {
     if (err) return res.status(500).json({ error: err.message });
@@ -4597,11 +4605,12 @@ app.get('/api/events/stream', (req, res) => {
 // alguns minutos se não der 200 OK rápido o suficiente.
 const mlWebhookInFlight = new Map(); // key: `${accountId}:${orderId}` → Promise
 
-async function resolveAccountIdFromMlUserId(userId) {
+async function resolveMlAccountFromUserId(userId) {
   if (!userId) return null;
   return await new Promise((rs) => db.get(
-    'SELECT id FROM ml_accounts WHERE ml_user_id = ? LIMIT 1',
-    [String(userId)], (e, r) => rs(r ? r.id : null)
+    `SELECT id, COALESCE(auto_sync_orders_enabled, 1) AS auto_sync_orders_enabled
+       FROM ml_accounts WHERE ml_user_id = ? LIMIT 1`,
+    [String(userId)], (e, r) => rs(r || null)
   ));
 }
 
@@ -4671,11 +4680,16 @@ async function syncOrderFromMlShipment(accountId, shipmentId) {
 
 async function processMlNotification({ topic, resource, user_id }) {
   if (!topic || !resource) return;
-  const accountId = await resolveAccountIdFromMlUserId(user_id);
-  if (!accountId) {
+  const account = await resolveMlAccountFromUserId(user_id);
+  if (!account) {
     console.warn(`[MlWebhook] ignorando notificação com user_id desconhecido: ${user_id} (topic=${topic})`);
     return;
   }
+  if (!account.auto_sync_orders_enabled) {
+    console.log(`[MlWebhook] conta ${account.id} com auto_sync_orders_enabled=0 — ignorando (topic=${topic})`);
+    return;
+  }
+  const accountId = account.id;
   const res = String(resource);
   if (topic === 'orders_v2' || topic === 'orders') {
     const m = /\/orders\/([^/?#]+)/.exec(res);
@@ -4736,7 +4750,8 @@ const shopeeWebhookInFlight = new Map();
 async function resolveShopeeAccountFromShopId(shopId) {
   if (!shopId) return null;
   return await new Promise((rs) => db.get(
-    'SELECT id, partner_key FROM shopee_accounts WHERE shop_id = ? LIMIT 1',
+    `SELECT id, partner_key, COALESCE(auto_sync_orders_enabled, 1) AS auto_sync_orders_enabled
+       FROM shopee_accounts WHERE shop_id = ? LIMIT 1`,
     [String(shopId)], (e, r) => rs(r || null)
   ));
 }
@@ -4826,6 +4841,10 @@ app.post('/api/shopee/webhook', async (req, res) => {
     const account = await resolveShopeeAccountFromShopId(shop_id);
     if (!account) {
       console.warn(`[ShopeeWebhook] shop_id desconhecido: ${shop_id}`);
+      return;
+    }
+    if (!account.auto_sync_orders_enabled) {
+      console.log(`[ShopeeWebhook] conta ${account.id} com auto_sync_orders_enabled=0 — ignorando (code=${code})`);
       return;
     }
 
@@ -9811,6 +9830,7 @@ app.get('/api/shopee/accounts', (req, res) => {
                  bling_account_id,
                  COALESCE(auto_invoice_enabled, 0) AS auto_invoice_enabled,
                  COALESCE(auto_sync_enabled, 0) AS auto_sync_enabled,
+                 COALESCE(auto_sync_orders_enabled, 1) AS auto_sync_orders_enabled,
                  last_items_sync_at, tax_pct,
                  created_at, updated_at
             FROM shopee_accounts ORDER BY id`, (err, rows) => {
@@ -11497,13 +11517,15 @@ app.get('/api/marketplace-bling-mapping', (req, res) => {
   const sql = `
     SELECT 'ml' AS marketplace, ml.id AS account_id, ml.name AS account_name,
            ml.bling_account_id, b.name AS bling_account_name,
-           COALESCE(ml.auto_invoice_enabled, 0) AS auto_invoice_enabled
+           COALESCE(ml.auto_invoice_enabled, 0) AS auto_invoice_enabled,
+           COALESCE(ml.auto_sync_orders_enabled, 1) AS auto_sync_orders_enabled
       FROM ml_accounts ml
       LEFT JOIN bling_accounts b ON b.id = ml.bling_account_id
     UNION ALL
     SELECT 'shopee' AS marketplace, sh.id AS account_id, sh.name AS account_name,
            sh.bling_account_id, b.name AS bling_account_name,
-           COALESCE(sh.auto_invoice_enabled, 0) AS auto_invoice_enabled
+           COALESCE(sh.auto_invoice_enabled, 0) AS auto_invoice_enabled,
+           COALESCE(sh.auto_sync_orders_enabled, 1) AS auto_sync_orders_enabled
       FROM shopee_accounts sh
       LEFT JOIN bling_accounts b ON b.id = sh.bling_account_id
     ORDER BY marketplace, account_name COLLATE NOCASE`;
@@ -11513,9 +11535,12 @@ app.get('/api/marketplace-bling-mapping', (req, res) => {
   });
 });
 
-// Atualiza o mapeamento em massa — aceita { marketplace, account_id, bling_account_id?, auto_invoice_enabled? }.
+// Atualiza o mapeamento em massa — aceita { marketplace, account_id,
+// bling_account_id?, auto_invoice_enabled?, auto_sync_orders_enabled? }.
+// Apesar do nome "bling-mapping", este endpoint virou o home genérico de
+// configurações por-conta do marketplace (flags de automação, vínculos).
 app.put('/api/marketplace-bling-mapping', (req, res) => {
-  const { marketplace, account_id, bling_account_id, auto_invoice_enabled } = req.body || {};
+  const { marketplace, account_id, bling_account_id, auto_invoice_enabled, auto_sync_orders_enabled } = req.body || {};
   if (!marketplace || !account_id) return res.status(400).json({ error: 'marketplace e account_id obrigatórios' });
   const table = marketplace === 'ml' ? 'ml_accounts' : marketplace === 'shopee' ? 'shopee_accounts' : null;
   if (!table) return res.status(400).json({ error: 'marketplace inválido' });
@@ -11528,6 +11553,10 @@ app.put('/api/marketplace-bling-mapping', (req, res) => {
   if (auto_invoice_enabled !== undefined) {
     sets.push('auto_invoice_enabled = ?');
     params.push(auto_invoice_enabled ? 1 : 0);
+  }
+  if (auto_sync_orders_enabled !== undefined) {
+    sets.push('auto_sync_orders_enabled = ?');
+    params.push(auto_sync_orders_enabled ? 1 : 0);
   }
   if (!sets.length) return res.status(400).json({ error: 'Nenhum campo para atualizar' });
   params.push(parseInt(account_id, 10));
@@ -13727,18 +13756,22 @@ const runOrdersSyncDeltaCycle = async ({ marketplace = null } = {}) => {
   const INTERNAL_BASE = `http://localhost:${PORT}`;
   const includeMl = !marketplace || marketplace === 'ml';
   const includeShopee = !marketplace || marketplace === 'shopee';
+  // auto_sync_orders_enabled=0 opt-out. COALESCE cobre contas pré-existentes
+  // que possam ter NULL mesmo com o DEFAULT 1 declarado (migrations antigas).
   const mlAccts = includeMl
     ? await new Promise((rs) => db.all(
         `SELECT a.id FROM ml_accounts a
            INNER JOIN api_tokens t ON t.account_id = a.id AND t.provider = 'mercado_livre'
-           WHERE t.refresh_token IS NOT NULL AND t.refresh_token != ''`,
+           WHERE t.refresh_token IS NOT NULL AND t.refresh_token != ''
+             AND COALESCE(a.auto_sync_orders_enabled, 1) = 1`,
         (e, r) => rs(e ? [] : (r || []))))
     : [];
   const shopeeAccts = includeShopee
     ? await new Promise((rs) => db.all(
         `SELECT a.id FROM shopee_accounts a
            INNER JOIN api_tokens t ON t.account_id = a.id AND t.provider = 'shopee'
-           WHERE t.access_token IS NOT NULL AND t.access_token != ''`,
+           WHERE t.access_token IS NOT NULL AND t.access_token != ''
+             AND COALESCE(a.auto_sync_orders_enabled, 1) = 1`,
         (e, r) => rs(e ? [] : (r || []))))
     : [];
   const internalReq = { headers: internalServiceHeaders() };

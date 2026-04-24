@@ -128,7 +128,7 @@ O sistema tem quatro crons independentes, configuráveis por env (em minutos, `0
 
 | Variável | Default | O que faz |
 |----------|---------|-----------|
-| `ORDERS_AUTO_INTERVAL_MIN` | `5` | Sync leve de **pedidos** ML+Shopee em modo delta (só novos/atualizados desde o último sync) + recálculo de custos em background. Sempre on para toda conta com token válido. |
+| `ORDERS_AUTO_INTERVAL_MIN` | `5` | Sync leve de **pedidos** ML+Shopee em modo delta (só novos/atualizados desde o último sync) + recálculo de custos em background. On por padrão para toda conta com token válido — pode ser desligado por conta via flag `auto_sync_orders_enabled`. |
 | `NFE_AUTO_INTERVAL_MIN` | `10` | Leitura de **NFes** (Faturador ML + Bling + upload na Shopee). Não emite, só lê. |
 | `AUTO_SYNC_INTERVAL_MIN` | `0` | Sync de **catálogo** (itens/anúncios). Opt-in por conta via `auto_sync_enabled`. |
 | `MARKETPLACE_AUTO_INTERVAL_MIN` | `0` | **Emissão** completa de NF Shopee (envia pro Bling e faz upload). Opt-in por conta via `auto_invoice_enabled`. |
@@ -167,6 +167,15 @@ Eventos atuais:
 - `order_synced`: pedido foi atualizado. Payload: `{ marketplace, marketplaceOrderId, accountId, localId, source, isNew }`. Só é emitido em mudança real (snapshot_hash diferente) para não spammar o canal.
 
 A autenticação usa o mesmo JWT do app, passado via query string (`?token=...`) já que `EventSource` não permite custom headers.
+
+### Flag por conta: `auto_sync_orders_enabled`
+
+Cada conta de marketplace (ML/Shopee) tem uma flag `auto_sync_orders_enabled` (default `1`) que controla toda a automação de pedidos da conta:
+
+- `1` (on) — a conta participa do cron `ORDERS_AUTO_INTERVAL_MIN` e os webhooks (ML `orders_v2`/`shipments`, Shopee códigos 3/4/15) são processados normalmente.
+- `0` (off) — cron e webhooks ignoram a conta. Só sync manual (botão "Buscar Pedidos") continua funcionando.
+
+Configurável em **Configurações → APIs Externas → [conta] → Sincronização automática de pedidos**. Útil para pausar uma conta específica temporariamente (rate-limit, troubleshooting, conta em trânsito para outro CNPJ) sem mexer nas variáveis globais de cron nem remover a conta do sistema.
 
 ## 📦 Sistema de Estoque
 
