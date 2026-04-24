@@ -198,16 +198,24 @@ const OrderCostsReport = ({ user }) => {
     const rows = data.orders.map(o => {
       const c = o.costs || {};
       const margin = c.gross_margin != null ? Number(c.gross_margin) : null;
-      const marginPct = (margin != null && c.gross_revenue)
-        ? (margin / Number(c.gross_revenue))
+      // Base da margem/alíquota = receita de faturamento (NF) = bruta − promo.
+      const billableBase = Number(c.gross_revenue || 0) - Number(c.discounts_seller || 0);
+      const marginPct = (margin != null && billableBase > 0)
+        ? (margin / billableBase)
         : null;
-      const effectiveTaxPct = (c.taxes_seller != null && c.gross_revenue > 0)
-        ? (Number(c.taxes_seller) / Number(c.gross_revenue))
+      const effectiveTaxPct = (c.taxes_seller != null && billableBase > 0)
+        ? (Number(c.taxes_seller) / billableBase)
         : null;
       const dateVal = o.order_date ? new Date(o.order_date.replace(' ', 'T')) : null;
       const buyer = (o.buyer_name || '').replace(/[\r\n]/g, ' ').trim();
       const skus = o.skus_summary || '';
       const warnings = Array.isArray(c.warnings) ? c.warnings.join(' | ') : '';
+      // Receita bruta exibida = valor da NF = preço cheio − desconto
+      // promocional do anúncio (discounts_seller). Mantemos a coluna
+      // "Desconto vendedor" zerada porque já está embutida na receita bruta
+      // exibida; o waterfall/detalhe ainda audita o valor cheio quando
+      // precisar.
+      const billableRevenue = Number(c.gross_revenue || 0) - Number(c.discounts_seller || 0);
       const baseCells = [
         { t: 's', v: o.marketplace === 'shopee' ? 'Shopee' : o.marketplace === 'mercado_livre' || o.marketplace === 'ml' ? 'Mercado Livre' : (o.marketplace || '') },
         { t: 'n', v: Number(o.account_id) || 0 },
@@ -216,14 +224,14 @@ const OrderCostsReport = ({ user }) => {
         dateVal && !Number.isNaN(dateVal.getTime()) ? { t: 'd', v: dateVal } : { t: 's', v: '' },
         { t: 's', v: o.status || '' },
         { t: 's', v: buyer },
-        { t: 'n', v: Number(c.gross_revenue || 0) },
+        { t: 'n', v: billableRevenue },
         { t: 'n', v: Number(c.marketplace_commission || 0) },
         { t: 'n', v: Number(c.marketplace_service_fee || 0) },
         { t: 'n', v: Number(c.payment_fee || 0) },
         { t: 'n', v: Number(c.shipping_cost_seller || 0) },
         { t: 'n', v: Number(c.shipping_subsidy || 0) },
         { t: 'n', v: Number(c.shipping_paid_by_buyer || 0) },
-        { t: 'n', v: Number(c.discounts_seller || 0) },
+        { t: 'n', v: 0 },
         { t: 'n', v: Number(c.discounts_marketplace || 0) },
         { t: 'n', v: Number(c.reverse_shipping_fee || 0) },
         { t: 'n', v: Number(c.taxes_withheld || 0) },
@@ -341,7 +349,10 @@ const OrderCostsReport = ({ user }) => {
 
   const agg = data.aggregates || {};
   const totalMargin = Number(agg.margin || 0);
-  const totalRevenue = Number(agg.gross_revenue || 0);
+  // Receita bruta exibida = valor de faturamento (NF) = preço cheio somado
+  // menos desconto promocional do anúncio. Usamos essa base também no % da
+  // margem para que o indicador bata com o que é de fato faturado.
+  const totalRevenue = Number(agg.gross_revenue || 0) - Number(agg.discounts_seller || 0);
   const marginPctAll = totalRevenue > 0 ? totalMargin / totalRevenue : null;
 
   return (
@@ -436,11 +447,12 @@ const OrderCostsReport = ({ user }) => {
       {/* Cards de resumo. Cards de COGS/margem só aparecem para role=4. */}
       {data.aggregates && (
         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
-          <SummaryCard label="Receita bruta" value={brl(agg.gross_revenue)} icon={DollarSign} tone="emerald" />
+          <SummaryCard label="Receita bruta" value={brl(totalRevenue)} icon={DollarSign} tone="emerald"
+            title="Valor de faturamento (NF): preço cheio do pedido menos o desconto promocional do anúncio. É a base usada para emissão de nota fiscal e cálculo de imposto." />
           <SummaryCard label="Comissões" value={brl(agg.commission + agg.service_fee + agg.payment_fee)} icon={Percent} tone="blue" />
           <SummaryCard label="Frete vendedor" value={brl(agg.shipping_cost_seller)} icon={Truck} tone="amber" />
-          <SummaryCard label="Descontos" value={brl(agg.discounts_seller + agg.discounts_marketplace)} icon={Tag} tone="purple"
-            title="Soma do desconto promocional do anúncio (preço cheio vs. preço pago) + cupons/descontos do marketplace ou do vendedor." />
+          <SummaryCard label="Descontos" value={brl(agg.discounts_marketplace)} icon={Tag} tone="purple"
+            title="Cupons/descontos aplicados pelo marketplace. O desconto promocional do anúncio já está embutido na Receita bruta (NF)." />
           <SummaryCard label="Líquido recebido" value={brl(agg.net_received)} icon={Receipt} tone="cyan" />
           {canSeeCogs && (
             <SummaryCard
@@ -476,10 +488,10 @@ const OrderCostsReport = ({ user }) => {
                 <th className="px-3 py-2">Data</th>
                 <th className="px-3 py-2">Canal</th>
                 <th className="px-3 py-2">Status</th>
-                <th className="px-3 py-2 text-right">Receita</th>
+                <th className="px-3 py-2 text-right" title="Valor de faturamento (NF): preço cheio do pedido menos o desconto promocional do anúncio.">Receita</th>
                 <th className="px-3 py-2 text-right">Comissão</th>
                 <th className="px-3 py-2 text-right">Frete vend.</th>
-                <th className="px-3 py-2 text-right" title="Soma do desconto promocional do anúncio (preço cheio vs. preço pago) + cupons/descontos aplicados pelo marketplace ou pelo vendedor.">Descontos</th>
+                <th className="px-3 py-2 text-right" title="Cupons/descontos aplicados pelo marketplace. O desconto promocional do anúncio já está descontado da Receita (NF).">Descontos</th>
                 <th className="px-3 py-2 text-right">Líquido</th>
                 {canSeeCogs && <th className="px-3 py-2 text-right" title="Imposto estimado do vendedor (Simples/PIS/COFINS etc.) aplicando a alíquota configurada na conta de marketplace. Configure em Configurações → Marketplaces.">Imposto</th>}
                 {canSeeCogs && <th className="px-3 py-2 text-right">COGS</th>}
@@ -501,13 +513,17 @@ const OrderCostsReport = ({ user }) => {
               {!loading && data.orders.map(o => {
                 const c = o.costs || {};
                 const margin = c.gross_margin;
-                const mPct = c.gross_revenue > 0 ? (margin / c.gross_revenue) : null;
+                // Receita/NF = preço cheio − desconto promocional do anúncio.
+                const billableRevenue = Number(c.gross_revenue || 0) - Number(c.discounts_seller || 0);
+                const mPct = billableRevenue > 0 ? (margin / billableRevenue) : null;
                 const noCosts = !o.has_costs;
                 const totalCommission = (c.marketplace_commission || 0) + (c.marketplace_service_fee || 0) + (c.payment_fee || 0);
                 // `shipping_subsidy` (save do ML) é informativo — não reduz o
                 // custo real do vendedor, que é exatamente `shipping_cost_seller`.
                 const netShipping = (c.shipping_cost_seller || 0);
-                const totalDiscounts = (c.discounts_seller || 0) + (c.discounts_marketplace || 0);
+                // Desconto promocional já está embutido na Receita (NF); aqui
+                // restam só cupons/descontos do marketplace.
+                const totalDiscounts = (c.discounts_marketplace || 0);
                 return (
                   <tr key={o.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/30">
                     <td className="px-3 py-2">
@@ -521,7 +537,7 @@ const OrderCostsReport = ({ user }) => {
                       </span>
                     </td>
                     <td className="px-3 py-2 text-xs text-gray-500 dark:text-gray-400">{o.status || '—'}</td>
-                    <td className="px-3 py-2 text-right tabular-nums">{noCosts ? '—' : brl(c.gross_revenue)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums">{noCosts ? '—' : brl(billableRevenue)}</td>
                     <td className="px-3 py-2 text-right tabular-nums text-red-600 dark:text-red-400">{noCosts ? '—' : `-${brl(totalCommission)}`}</td>
                     <td className="px-3 py-2 text-right tabular-nums text-red-600 dark:text-red-400">{noCosts ? '—' : (netShipping > 0 ? `-${brl(netShipping)}` : brl(-netShipping))}</td>
                     <td className="px-3 py-2 text-right tabular-nums text-red-600 dark:text-red-400">{noCosts ? '—' : (totalDiscounts > 0 ? `-${brl(totalDiscounts)}` : brl(0))}</td>
@@ -651,8 +667,12 @@ function OrderCostDetailModal({ order, loading, data, showRawJson, onToggleRawJs
   // total da Shopee"). No ML, mantemos separadas porque refletem escopos
   // diferentes (comissão = categoria, taxa de serviço = envio Full/Flex).
   const isShopee = order.marketplace === 'shopee';
+  // Receita bruta exibida = valor da NF (preço cheio − desconto promocional
+  // do anúncio). O desconto promocional não aparece como linha separada no
+  // waterfall porque já está embutido nessa base.
+  const billableRevenue = gross - discSeller;
   const waterfall = [
-    { label: 'Receita bruta', value: gross, kind: 'gross' },
+    { label: 'Receita bruta (NF)', value: billableRevenue, kind: 'gross' },
     isShopee
       ? { label: 'Comissão + taxa de serviço', value: -(commission + serviceFee), kind: 'deduction', hideIfZero: true }
       : { label: 'Comissão marketplace', value: -commission, kind: 'deduction' },
@@ -664,7 +684,6 @@ function OrderCostDetailModal({ order, loading, data, showRawJson, onToggleRawJs
     // abaixo do waterfall, não entra na soma — o vendedor paga `cost` direto
     // e o `save` só indica quanto o ML absorveu do preço cheio.
     { label: 'Frete pago pelo vendedor', value: -shipSeller, kind: 'deduction', hideIfZero: true },
-    { label: 'Desconto promocional do anúncio', value: -discSeller, kind: 'deduction', hideIfZero: true },
     { label: 'Cupons/descontos marketplace', value: -discMarket, kind: 'deduction', hideIfZero: true },
     { label: 'Frete reverso (devolução)', value: -reverse, kind: 'deduction', hideIfZero: true },
     { label: 'Impostos retidos', value: -taxes, kind: 'deduction', hideIfZero: true },
@@ -731,6 +750,11 @@ function OrderCostDetailModal({ order, loading, data, showRawJson, onToggleRawJs
                     </div>
                   ))}
                 </div>
+                {rec && discSeller > 0 && (
+                  <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400 italic">
+                    Preço cheio do pedido: {brl(gross)}. Desconto promocional do anúncio ({brl(discSeller)}) já está embutido na Receita bruta (NF) acima.
+                  </div>
+                )}
                 {rec && order.marketplace === 'mercado_livre' && shipSubsidy > 0 && (
                   <div className="mt-2 text-[11px] text-gray-500 dark:text-gray-400 italic">
                     ML absorveu {brl(shipSubsidy)} do preço cheio do frete (desconto promocional; informativo, não reduz seu custo de {brl(shipSeller)}).
