@@ -135,6 +135,17 @@ O sistema tem quatro crons independentes, configuráveis por env (em minutos, `0
 
 Na tela **Pedidos Marketplace** existe também um seletor de auto-refresh (`Off / 1 / 5 / 15 min`) que chama `POST /api/marketplace-orders/sync-delta` e relê a lista sem precisar clicar em "Buscar Pedidos". A preferência fica salva no navegador.
 
+### Webhook do Mercado Livre (quase tempo real)
+
+A rota `POST /api/ml/callback` aceita notificações do Mercado Livre e usa-as para sincronizar um pedido específico na hora (sem esperar o próximo ciclo do cron delta). Os topics roteados são:
+
+- `orders_v2` / `orders` → busca `/orders/{id}` e aplica INSERT/UPDATE + recálculo de custos.
+- `shipments` → resolve `order_id` a partir do shipment e sincroniza o pedido correspondente (útil para atualizações de etiqueta / status de envio).
+
+Topics diferentes são ignorados no webhook e continuam sendo tratados por outros fluxos (ex.: `questions` pela aba de Atendimento, `items` pelo sync de catálogo). A notificação é respondida com `200 OK` imediatamente e o processamento é feito em background; duplicatas do mesmo pedido são coalesce-adas enquanto a sync está em andamento.
+
+Para ligar/desligar o webhook sem mexer na assinatura no painel do ML, use `ML_WEBHOOK_ENABLED=0` / `1`. A autenticidade é validada cruzando `user_id` com os `ml_accounts` conectados — notificações de outros sellers são ignoradas.
+
 ## 📦 Sistema de Estoque
 
 ### Estrutura dos Dados

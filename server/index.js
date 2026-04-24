@@ -4522,10 +4522,137 @@ app.get('/api/ml/callback', async (req, res) => {
   }
 });
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Webhook do Mercado Livre (quase tempo real para pedidos)
+// ──────────────────────────────────────────────────────────────────────────────
+// ML publica notificações para topics inscritos no App (orders_v2, shipments,
+// claims, messages, items…). Aqui só roteamos os topics relevantes para
+// pedidos e reaproveitamos fetchMlOrderFull + applyFreshOrderToDb, que já
+// cuidam de INSERT/UPDATE, history, hash, hidratação e recálculo de custos
+// em background. O resultado é que um pedido novo (ou um update de status,
+// pagamento, envio) chega no DB em segundos — sem esperar o cron delta.
+//
+// Segurança: ML não assina as requisições. O defense-in-depth é (a) só aceitar
+// topics na whitelist e (b) só processar se user_id bate com algum ml_account
+// conectado (qualquer outro valor é ignorado). Um atacante que adivinhar esses
+// dados só consegue nos forçar a re-sincronizar pedidos legítimos da própria
+// conta — inócuo.
+
+// Dedup em memória: coalesce notificações repetidas do mesmo pedido enquanto
+// uma sync já está rodando. ML reenvia a mesma notif várias vezes durante
+// alguns minutos se não der 200 OK rápido o suficiente.
+const mlWebhookInFlight = new Map(); // key: `${accountId}:${orderId}` → Promise
+
+async function resolveAccountIdFromMlUserId(userId) {
+  if (!userId) return null;
+  return await new Promise((rs) => db.get(
+    'SELECT id FROM ml_accounts WHERE ml_user_id = ? LIMIT 1',
+    [String(userId)], (e, r) => rs(r ? r.id : null)
+  ));
+}
+
+async function syncSingleMlOrder(accountId, orderId, { reason = 'ml_webhook' } = {}) {
+  if (!accountId || !orderId) return;
+  const key = `${accountId}:${orderId}`;
+  if (mlWebhookInFlight.has(key)) return mlWebhookInFlight.get(key);
+  const task = (async () => {
+    try {
+      let row = await new Promise((rs) => db.get(
+        'SELECT * FROM marketplace_orders WHERE marketplace = ? AND marketplace_order_id = ? AND account_id = ?',
+        ['ml', String(orderId), accountId], (e, r) => rs(r || null)
+      ));
+      if (!row) {
+        // Insere shell mínimo; applyFreshOrderToDb preenche o resto logo em seguida.
+        await new Promise((rs, rj) => db.run(
+          `INSERT OR IGNORE INTO marketplace_orders (marketplace, marketplace_order_id, account_id, status, order_date, synced_at)
+           VALUES ('ml', ?, ?, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [String(orderId), accountId], (e) => e ? rj(e) : rs()
+        ));
+        row = await new Promise((rs) => db.get(
+          'SELECT * FROM marketplace_orders WHERE marketplace = ? AND marketplace_order_id = ? AND account_id = ?',
+          ['ml', String(orderId), accountId], (e, r) => rs(r || null)
+        ));
+      }
+      if (!row) {
+        console.warn(`[MlWebhook] falha inserindo shell para pedido ${orderId} (account ${accountId})`);
+        return;
+      }
+      const fresh = await fetchMlOrderFull(row);
+      await applyFreshOrderToDb(row, fresh, reason);
+      console.log(`[MlWebhook] pedido ${orderId} sincronizado (account ${accountId}, reason=${reason})`);
+    } catch (e) {
+      if (e && e.notFound) {
+        console.warn(`[MlWebhook] pedido ${orderId} não existe mais no ML (account ${accountId})`);
+      } else {
+        console.error(`[MlWebhook] erro sincronizando pedido ${orderId} (account ${accountId}):`, e?.response?.data?.message || e.message);
+      }
+    } finally {
+      mlWebhookInFlight.delete(key);
+    }
+  })();
+  mlWebhookInFlight.set(key, task);
+  return task;
+}
+
+async function syncOrderFromMlShipment(accountId, shipmentId) {
+  if (!accountId || !shipmentId) return;
+  try {
+    const ship = await mlApiGet(`/shipments/${shipmentId}`, accountId);
+    // order_id costuma vir direto, mas alguns endpoints devolvem o array orders[].
+    let orderId = ship?.order_id || null;
+    if (!orderId && Array.isArray(ship?.orders) && ship.orders[0]?.id) {
+      orderId = ship.orders[0].id;
+    }
+    if (orderId) {
+      await syncSingleMlOrder(accountId, String(orderId), { reason: 'ml_webhook_shipment' });
+    } else {
+      console.warn(`[MlWebhook] shipment ${shipmentId} sem order_id (account ${accountId})`);
+    }
+  } catch (e) {
+    const status = e?.response?.status;
+    if (status === 404 || status === 410) return; // shipment sumiu — ignorar
+    console.warn(`[MlWebhook] erro resolvendo shipment ${shipmentId}:`, e?.response?.data?.message || e.message);
+  }
+}
+
+async function processMlNotification({ topic, resource, user_id }) {
+  if (!topic || !resource) return;
+  const accountId = await resolveAccountIdFromMlUserId(user_id);
+  if (!accountId) {
+    console.warn(`[MlWebhook] ignorando notificação com user_id desconhecido: ${user_id} (topic=${topic})`);
+    return;
+  }
+  const res = String(resource);
+  if (topic === 'orders_v2' || topic === 'orders') {
+    const m = /\/orders\/([^/?#]+)/.exec(res);
+    if (m) await syncSingleMlOrder(accountId, m[1], { reason: 'ml_webhook_order' });
+    return;
+  }
+  if (topic === 'shipments') {
+    const m = /\/shipments\/([^/?#]+)/.exec(res);
+    if (m) await syncOrderFromMlShipment(accountId, m[1]);
+    return;
+  }
+  // Outros topics (items, claims, messages, post_purchase, etc.) ficam fora
+  // de escopo deste webhook — tratados pelos fluxos próprios ou pelo cron.
+}
+
 app.post('/api/ml/callback', async (req, res) => {
   const { topic, resource, user_id, application_id } = req.body || {};
-  console.log(`[ML] Notification received: topic=${topic}, resource=${resource}, user_id=${user_id}`);
+  // ML exige resposta 200 em <500ms, senão reenfileira e spamma a fila.
+  // Responder imediatamente e processar em background.
   res.status(200).json({ ok: true });
+  if (process.env.ML_WEBHOOK_ENABLED === '0') return;
+  try {
+    console.log(`[MlWebhook] recebido: topic=${topic} resource=${resource} user_id=${user_id} app=${application_id || '-'}`);
+    setImmediate(() => {
+      processMlNotification({ topic, resource, user_id }).catch((err) => {
+        console.error('[MlWebhook] erro processando notificação:', err?.message || err);
+      });
+    });
+  } catch (e) {
+    console.error('[MlWebhook] erro inesperado:', e.message);
+  }
 });
 
 app.get('/api/ml/status', async (req, res) => {
