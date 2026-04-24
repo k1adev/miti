@@ -643,7 +643,15 @@ app.use((req, res, next) => {
   });
   next();
 });
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({
+  limit: '10mb',
+  // Guarda uma cópia do body bruto em req.rawBody — necessário para validar
+  // assinaturas HMAC em webhooks (Shopee push usa HMAC sobre {url}|{body}).
+  // Custo é uma string extra por request; o limit de 10mb já controla o teto.
+  verify: (req, _res, buf) => {
+    req.rawBody = buf && buf.length ? buf.toString('utf8') : '';
+  },
+}));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Estratégia de cache para evitar que navegadores sirvam uma versão antiga
@@ -2270,6 +2278,7 @@ const PUBLIC_ROUTES = [
   '/api/bling/callback',
   '/api/ml/callback',
   '/api/shopee/callback',
+  '/api/shopee/webhook',
   '/api/shopee/test-sign',
   '/api/shopee/live-test',
   '/api/password-reset-request',
@@ -4697,6 +4706,148 @@ app.post('/api/ml/callback', async (req, res) => {
     });
   } catch (e) {
     console.error('[MlWebhook] erro inesperado:', e.message);
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Webhook da Shopee — Push Mechanism (quase tempo real para pedidos)
+// ──────────────────────────────────────────────────────────────────────────────
+// A Shopee envia POST para a URL configurada no Partner Console com body
+// { shop_id, code, data, timestamp } e header Authorization = HMAC-SHA256
+// hex de `${full_url}|${raw_body}` usando partner_key. Reaproveitamos o
+// mesmo caminho de sync usado pelo cron/sync manual (fetchShopeeOrderFull +
+// applyFreshOrderToDb → hydrateAndRecord dispara recálculo de custos +
+// broadcast SSE). Resultado: um update de status/etiqueta da Shopee reflete
+// na tela em segundos.
+//
+// Códigos v2 relevantes a pedidos:
+//   3  = Order Status Update (mais comum)
+//   4  = TrackingNo Push
+//   15 = Shipping Document Status
+// Outros (1 auth, 2 deauth, promotion, etc.) são ignorados aqui.
+//
+// Segurança: validamos a assinatura com o partner_key do account resolvido
+// via shop_id do payload. SHOPEE_WEBHOOK_STRICT=1 (default) rejeita qualquer
+// request sem assinatura válida; 0 permite (útil em dev local com ngrok
+// quando a URL pode não bater exatamente com o que a Shopee assinou).
+
+const shopeeWebhookInFlight = new Map();
+
+async function resolveShopeeAccountFromShopId(shopId) {
+  if (!shopId) return null;
+  return await new Promise((rs) => db.get(
+    'SELECT id, partner_key FROM shopee_accounts WHERE shop_id = ? LIMIT 1',
+    [String(shopId)], (e, r) => rs(r || null)
+  ));
+}
+
+async function syncSingleShopeeOrder(accountId, orderSn, { reason = 'shopee_webhook' } = {}) {
+  if (!accountId || !orderSn) return;
+  const key = `${accountId}:${orderSn}`;
+  if (shopeeWebhookInFlight.has(key)) return shopeeWebhookInFlight.get(key);
+  const task = (async () => {
+    try {
+      let row = await new Promise((rs) => db.get(
+        'SELECT * FROM marketplace_orders WHERE marketplace = ? AND marketplace_order_id = ? AND account_id = ?',
+        ['shopee', String(orderSn), accountId], (e, r) => rs(r || null)
+      ));
+      if (!row) {
+        await new Promise((rs, rj) => db.run(
+          `INSERT OR IGNORE INTO marketplace_orders (marketplace, marketplace_order_id, account_id, status, order_date, synced_at)
+           VALUES ('shopee', ?, ?, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          [String(orderSn), accountId], (e) => e ? rj(e) : rs()
+        ));
+        row = await new Promise((rs) => db.get(
+          'SELECT * FROM marketplace_orders WHERE marketplace = ? AND marketplace_order_id = ? AND account_id = ?',
+          ['shopee', String(orderSn), accountId], (e, r) => rs(r || null)
+        ));
+      }
+      if (!row) {
+        console.warn(`[ShopeeWebhook] falha inserindo shell para ${orderSn} (account ${accountId})`);
+        return;
+      }
+      const fresh = await fetchShopeeOrderFull(row);
+      await applyFreshOrderToDb(row, fresh, reason);
+      console.log(`[ShopeeWebhook] pedido ${orderSn} sincronizado (account ${accountId}, reason=${reason})`);
+    } catch (e) {
+      if (e && e.notFound) {
+        console.warn(`[ShopeeWebhook] pedido ${orderSn} não existe mais na Shopee (account ${accountId})`);
+      } else {
+        console.error(`[ShopeeWebhook] erro sincronizando ${orderSn} (account ${accountId}):`, e?.message);
+      }
+    } finally {
+      shopeeWebhookInFlight.delete(key);
+    }
+  })();
+  shopeeWebhookInFlight.set(key, task);
+  return task;
+}
+
+function validateShopeeWebhookSignature(fullUrl, rawBody, partnerKey, headerSig) {
+  if (!partnerKey || !headerSig) return false;
+  const base = `${fullUrl}|${rawBody || ''}`;
+  try {
+    const expected = crypto.createHmac('sha256', String(partnerKey)).update(base).digest('hex');
+    const a = Buffer.from(expected, 'hex');
+    const b = Buffer.from(String(headerSig).trim(), 'hex');
+    if (a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
+  } catch (_) {
+    return false;
+  }
+}
+
+async function processShopeeWebhook(payload, accountId) {
+  const { code, data } = payload || {};
+  if (!code) return;
+  if (code === 3 || code === 4 || code === 15) {
+    const orderSn = data?.ordersn || data?.order_sn || data?.orderSN || null;
+    if (orderSn) {
+      await syncSingleShopeeOrder(accountId, String(orderSn), { reason: `shopee_webhook_code_${code}` });
+    } else {
+      console.warn(`[ShopeeWebhook] code=${code} sem ordersn (account ${accountId})`);
+    }
+    return;
+  }
+  // Outros códigos (1 auth, 2 deauth, promo, escrow, etc.) ficam fora do
+  // escopo de sync de pedidos. Só logamos pra auditoria.
+  console.log(`[ShopeeWebhook] code=${code} ignorado (account ${accountId})`);
+}
+
+app.post('/api/shopee/webhook', async (req, res) => {
+  // Shopee espera 200 rápido; se demorar, ela reenfileira e spamma.
+  res.status(200).json({ ok: true });
+  if (process.env.SHOPEE_WEBHOOK_ENABLED === '0') return;
+  try {
+    const payload = req.body || {};
+    const { shop_id, code } = payload;
+    console.log(`[ShopeeWebhook] recebido: code=${code} shop_id=${shop_id}`);
+
+    const account = await resolveShopeeAccountFromShopId(shop_id);
+    if (!account) {
+      console.warn(`[ShopeeWebhook] shop_id desconhecido: ${shop_id}`);
+      return;
+    }
+
+    const headerSig = req.headers['authorization'] || req.headers['Authorization'] || '';
+    const proto = (req.headers['x-forwarded-proto'] || req.protocol || 'https').toString().split(',')[0].trim();
+    const host = req.headers['x-forwarded-host'] || req.get('host');
+    const fullUrl = `${proto}://${host}${req.originalUrl.split('?')[0]}`;
+    const rawBody = typeof req.rawBody === 'string' ? req.rawBody : JSON.stringify(payload);
+    const sigOk = validateShopeeWebhookSignature(fullUrl, rawBody, account.partner_key, headerSig);
+    if (!sigOk) {
+      const strict = process.env.SHOPEE_WEBHOOK_STRICT !== '0';
+      console.warn(`[ShopeeWebhook] assinatura inválida (shop_id=${shop_id}, url=${fullUrl}) — strict=${strict}`);
+      if (strict) return;
+    }
+
+    setImmediate(() => {
+      processShopeeWebhook(payload, account.id).catch((err) => {
+        console.error('[ShopeeWebhook] erro processando:', err?.message || err);
+      });
+    });
+  } catch (e) {
+    console.error('[ShopeeWebhook] erro inesperado:', e.message);
   }
 });
 

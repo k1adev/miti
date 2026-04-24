@@ -146,6 +146,18 @@ Topics diferentes são ignorados no webhook e continuam sendo tratados por outro
 
 Para ligar/desligar o webhook sem mexer na assinatura no painel do ML, use `ML_WEBHOOK_ENABLED=0` / `1`. A autenticidade é validada cruzando `user_id` com os `ml_accounts` conectados — notificações de outros sellers são ignoradas.
 
+### Push da Shopee (quase tempo real)
+
+`POST /api/shopee/webhook` recebe o Push Mechanism da Shopee. Códigos roteados para sync imediato do pedido:
+
+- `3` → Order Status Update
+- `4` → TrackingNo Push
+- `15` → Shipping Document Status
+
+A validação de autenticidade usa HMAC-SHA256 sobre `${full_url}|${raw_body}` com o `partner_key` do `shopee_account` correspondente (resolvido pelo `shop_id` do payload). Em produção, mantenha `SHOPEE_WEBHOOK_STRICT=1` para rejeitar qualquer push sem assinatura válida. `SHOPEE_WEBHOOK_ENABLED=0` desliga tudo sem precisar remover a URL no Partner Console.
+
+Para configurar no Partner Console da Shopee: em "Webhook Configuration", aponte para `https://SEU-DOMINIO/api/shopee/webhook` e marque ao menos os códigos 3, 4 e 15 (os outros são ignorados pelo servidor por enquanto).
+
 ### Stream de eventos em tempo real (SSE)
 
 `GET /api/events/stream` é um canal SSE que empurra eventos do servidor para qualquer cliente conectado. A tela **Pedidos Marketplace** assina esse canal automaticamente enquanto está aberta e, ao receber `order_synced` (emitido sempre que um pedido é atualizado no DB — via webhook ML, cron delta ou sync manual), relê a lista imediatamente. Os ciclos de polling do cliente (Auto 1/5/15 min) continuam ativos como fallback caso o stream caia.
