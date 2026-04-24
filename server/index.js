@@ -12571,16 +12571,10 @@ async function applyFreshOrderToDb(orderRow, fresh, source) {
     try { await resolveMissingSkusForOrder(orderRow); } catch (_) { /* best-effort */ }
   }
 
-  // Dispara o recálculo da quebra de custos em background. Não bloqueia o
-  // sync — se falhar, fica registrado em marketplace_order_costs como
-  // reconstructed ausente e o usuário pode forçar via POST /recalc.
-  try {
-    const freshRow = await new Promise((rs) => db.get('SELECT * FROM marketplace_orders WHERE id = ?', [orderRow.id], (e, r) => rs(r || null)));
-    const itemsFresh = await new Promise((rs) => db.all('SELECT * FROM marketplace_order_items WHERE order_id = ?', [orderRow.id], (e, r) => rs(r || [])));
-    // Não espera o resultado: custos são um relatório, não um dado crítico.
-    setImmediate(() => { computeOrderCostsSafe(freshRow, itemsFresh).catch(() => {}); });
-  } catch (_) { /* best-effort */ }
-
+  // O recálculo de custos é disparado dentro de hydrateAndRecord (abaixo)
+  // quando o snapshot muda, evitando duplicar trabalho. Se o marketplace
+  // devolveu os mesmos dados, pulamos — os custos não mudariam de qualquer
+  // forma porque dependem da mesma entrada.
   return hydrateAndRecord(orderRow.id, source, orderRow.snapshot_hash);
 }
 
@@ -12607,6 +12601,10 @@ function markHydrateError(orderRow, errMsg) {
 // Atualiza campos de hidratação + (se mudou) insere linha no history.
 // row = registro atual do banco (antes do UPDATE). itemsFresh = array já
 // gravado na marketplace_order_items. Retorna { inserted, hash }.
+// Além disso, quando há mudança real (inserted=true) ou é a primeira vez que
+// vemos o pedido (prevHash nulo), dispara o recálculo de custos em background.
+// Isso garante que o relatório de Custos de Pedido reflita novos pedidos e
+// mudanças de status/escrow sem depender do recálculo manual.
 async function hydrateAndRecord(orderId, source, prevHash) {
   const row = await new Promise((rs) => db.get('SELECT * FROM marketplace_orders WHERE id = ?', [orderId], (e, r) => rs(r || null)));
   if (!row) return { inserted: false };
@@ -12617,6 +12615,13 @@ async function hydrateAndRecord(orderId, source, prevHash) {
       `UPDATE marketplace_orders SET snapshot_hash = ?, last_hydrated_at = CURRENT_TIMESTAMP, hydrate_source = ?, hydrate_attempts = 0, hydrate_last_error = NULL WHERE id = ?`,
       [result.hash, source || 'live_sync', orderId]
     );
+  }
+  // Dispara recálculo de custos quando o pedido é novo ou quando algo mudou
+  // (status, escrow, itens etc.). Em background, nunca bloqueia o sync.
+  if (result.inserted || !prevHash) {
+    setImmediate(() => {
+      computeOrderCostsSafe(row, items).catch(() => { /* best-effort */ });
+    });
   }
   return result;
 }
@@ -13367,6 +13372,104 @@ app.post('/api/marketplace-orders/sync-all', async (req, res) => {
     res.status(500).json({ error: err.message, synced, totals, invoices, errors });
   }
 });
+
+// ----------------------------------------------------------------------------
+// Sync delta: alternativa enxuta ao sync-all. Para cada conta com token,
+// chama o endpoint interno /sync SEM dateFrom/dateTo, o que liga o modo
+// incremental (somente pedidos novos/atualizados desde last_orders_sync_at
+// com overlap). NÃO dispara fetch-ml-invoices / batch-nfe-check — isso já é
+// responsabilidade do cron NFE_AUTO_INTERVAL_MIN (sempre on).
+//
+// Consumidores: auto-refresh da UI (polling a cada N min) e cron
+// ORDERS_AUTO_INTERVAL_MIN abaixo. Os custos são recalculados automaticamente
+// em background via applyFreshOrderToDb → computeOrderCostsSafe para cada
+// pedido novo/atualizado.
+// ----------------------------------------------------------------------------
+const runOrdersSyncDeltaCycle = async ({ marketplace = null } = {}) => {
+  const INTERNAL_BASE = `http://localhost:${PORT}`;
+  const includeMl = !marketplace || marketplace === 'ml';
+  const includeShopee = !marketplace || marketplace === 'shopee';
+  const mlAccts = includeMl
+    ? await new Promise((rs) => db.all(
+        `SELECT a.id FROM ml_accounts a
+           INNER JOIN api_tokens t ON t.account_id = a.id AND t.provider = 'mercado_livre'
+           WHERE t.refresh_token IS NOT NULL AND t.refresh_token != ''`,
+        (e, r) => rs(e ? [] : (r || []))))
+    : [];
+  const shopeeAccts = includeShopee
+    ? await new Promise((rs) => db.all(
+        `SELECT a.id FROM shopee_accounts a
+           INNER JOIN api_tokens t ON t.account_id = a.id AND t.provider = 'shopee'
+           WHERE t.access_token IS NOT NULL AND t.access_token != ''`,
+        (e, r) => rs(e ? [] : (r || []))))
+    : [];
+  const internalReq = { headers: internalServiceHeaders() };
+  const results = [];
+  let totalSynced = 0;
+
+  for (const acc of mlAccts) {
+    try {
+      const r = await axios.post(`${INTERNAL_BASE}/api/marketplace-orders/sync`,
+        { marketplace: 'ml', accountId: acc.id }, internalReq);
+      const s = Number(r.data?.synced || 0);
+      totalSynced += s;
+      results.push({ marketplace: 'ml', accountId: acc.id, synced: s, total: Number(r.data?.total || 0), incremental: !!r.data?.incremental });
+    } catch (e) {
+      const msg = e.response?.data?.error || e.response?.data?.details || e.message;
+      results.push({ marketplace: 'ml', accountId: acc.id, error: msg });
+      console.error('[SyncDelta ML]', acc.id, msg);
+    }
+  }
+  for (const acc of shopeeAccts) {
+    try {
+      const r = await axios.post(`${INTERNAL_BASE}/api/marketplace-orders/sync`,
+        { marketplace: 'shopee', accountId: acc.id }, internalReq);
+      const s = Number(r.data?.synced || 0);
+      totalSynced += s;
+      results.push({ marketplace: 'shopee', accountId: acc.id, synced: s, total: Number(r.data?.total || 0) });
+    } catch (e) {
+      const msg = e.response?.data?.error || e.response?.data?.details || e.message;
+      results.push({ marketplace: 'shopee', accountId: acc.id, error: msg });
+      console.error('[SyncDelta Shopee]', acc.id, msg);
+    }
+  }
+  return { totalSynced, results };
+};
+
+app.post('/api/marketplace-orders/sync-delta', async (req, res) => {
+  const { marketplace = null } = req.body || {};
+  try {
+    const out = await runOrdersSyncDeltaCycle({ marketplace });
+    res.json({ success: true, ...out });
+  } catch (err) {
+    console.error('[SyncDelta] erro:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Cron sempre on: sincroniza pedidos novos/atualizados para todas as contas
+// conectadas no intervalo ORDERS_AUTO_INTERVAL_MIN (default 5 min). Diferente
+// de MARKETPLACE_AUTO_INTERVAL_MIN (pipeline completo de NF, opt-in por conta)
+// e AUTO_SYNC_INTERVAL_MIN (sync de itens/catálogo), este foca em pedidos.
+// Para desligar, use ORDERS_AUTO_INTERVAL_MIN=0.
+const ordersAutoMinutes = parseInt(process.env.ORDERS_AUTO_INTERVAL_MIN || '5', 10);
+if (ordersAutoMinutes > 0) {
+  const runCycle = async () => {
+    try {
+      const out = await runOrdersSyncDeltaCycle({});
+      if (out.totalSynced > 0) {
+        console.log(`[AutoOrders] ciclo: ${out.totalSynced} pedido(s) sincronizado(s) em ${out.results.length} conta(s)`);
+      }
+    } catch (e) {
+      console.error('[AutoOrders] loop error:', e.message);
+    }
+  };
+  // Primeiro ciclo após 45s (dá tempo do boot completar e do NFE_AUTO rodar
+  // seu primeiro ciclo em 60s) e depois no intervalo.
+  setTimeout(runCycle, 45 * 1000);
+  setInterval(runCycle, ordersAutoMinutes * 60 * 1000);
+  console.log(`[AutoOrders] Habilitado — intervalo de ${ordersAutoMinutes} min`);
+}
 
 // ============================================================================
 // Nightly backup — endpoints de status, histórico e trigger manual.

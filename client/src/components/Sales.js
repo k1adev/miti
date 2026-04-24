@@ -162,6 +162,21 @@ export const Sales = () => {
   const [mktHistoryOpenFor, setMktHistoryOpenFor] = useState(null);
   const [mktHistoryRows, setMktHistoryRows] = useState([]);
   const [mktHistoryLoading, setMktHistoryLoading] = useState(false);
+  // Auto-refresh da aba Pedidos Marketplace.
+  // `mktAutoInterval` persiste em localStorage; valores: 'off'|'1'|'5'|'15' (min).
+  // Quando ligado, roda em duas camadas: soft refresh (30s, só relê a lista) e
+  // hard sync delta (no intervalo escolhido, chama POST /sync-delta no servidor
+  // que sincroniza só pedidos novos/atualizados desde o último sync).
+  const [mktAutoInterval, setMktAutoInterval] = useState(() => {
+    try {
+      const v = localStorage.getItem('mkt_auto_interval');
+      return ['off', '1', '5', '15'].includes(v) ? v : 'off';
+    } catch { return 'off'; }
+  });
+  const [mktLastAutoSync, setMktLastAutoSync] = useState(null);
+  const [mktNewOrdersBadge, setMktNewOrdersBadge] = useState(0);
+  const mktPrevTotalRef = useRef(null);
+  const mktAutoInFlightRef = useRef(false);
   const [mktNfeLoading, setMktNfeLoading] = useState(false);
   const mktSearchDebounceRef = useRef(null);
 
@@ -344,6 +359,33 @@ export const Sales = () => {
     }
   }, [fetchMktOrders, fetchBackupStatus, toast]);
 
+  // Auto-refresh (hard sync delta): chama o endpoint leve do servidor que
+  // sincroniza apenas pedidos novos/atualizados desde o último sync de cada
+  // conta conectada — sem fetch pesado de NFes (isso é responsabilidade do
+  // cron NFE_AUTO no backend). Silencioso: não bloqueia UI nem emite toast
+  // exceto em erro grave.
+  const runAutoSyncDelta = useCallback(async () => {
+    if (mktAutoInFlightRef.current) return;
+    mktAutoInFlightRef.current = true;
+    try {
+      const channel = mktMarketplaceFilter || null;
+      const body = {};
+      if (channel) body.marketplace = channel;
+      const res = await axios.post('/api/marketplace-orders/sync-delta', body, { timeout: 5 * 60 * 1000 });
+      setMktLastAutoSync(new Date());
+      const synced = Number(res.data?.totalSynced || 0);
+      if (synced > 0) {
+        setMktNewOrdersBadge(prev => prev + synced);
+        setTimeout(() => setMktNewOrdersBadge(0), 8000);
+      }
+      await fetchMktOrders();
+    } catch (err) {
+      console.warn('[autoSyncDelta] falhou:', err?.response?.data?.error || err.message);
+    } finally {
+      mktAutoInFlightRef.current = false;
+    }
+  }, [mktMarketplaceFilter, fetchMktOrders]);
+
   // Busca unificada: sincroniza pedidos + NFes do ML Faturador + NFes do Bling
   // numa única chamada. Respeita o filtro de canal atual (mktMarketplaceFilter):
   // vazio → ML + Shopee; 'ml' → só ML; 'shopee' → só Shopee.
@@ -386,6 +428,7 @@ export const Sales = () => {
       if (Array.isArray(res.data?.errors) && res.data.errors.length > 0) {
         console.warn('[SyncAll] erros parciais:', res.data.errors);
       }
+      setMktLastAutoSync(new Date());
       fetchMktOrders();
     } catch (err) {
       const msg = err.response?.data?.error || err.response?.data?.details || err.message || 'Erro ao sincronizar pedidos';
@@ -771,6 +814,73 @@ export const Sales = () => {
   useEffect(() => () => {
     if (mktSearchDebounceRef.current) clearTimeout(mktSearchDebounceRef.current);
   }, []);
+
+  // Persistência do modo de auto-refresh (Off/1/5/15 min).
+  useEffect(() => {
+    try { localStorage.setItem('mkt_auto_interval', mktAutoInterval); } catch (_) { /* ignore */ }
+  }, [mktAutoInterval]);
+
+  // Badge "+N novos": detecta crescimento do total entre reloads da lista.
+  // Quando o total aumenta, marca a diferença por alguns segundos.
+  useEffect(() => {
+    const prev = mktPrevTotalRef.current;
+    if (prev != null && mktTotal > prev) {
+      const delta = mktTotal - prev;
+      setMktNewOrdersBadge(prevBadge => prevBadge + delta);
+      const tid = setTimeout(() => setMktNewOrdersBadge(0), 8000);
+      mktPrevTotalRef.current = mktTotal;
+      return () => clearTimeout(tid);
+    }
+    mktPrevTotalRef.current = mktTotal;
+  }, [mktTotal]);
+
+  // Loop de auto-refresh. Só ativo quando a aba é Pedidos Marketplace e
+  // o usuário escolheu um intervalo (!= 'off'). Duas camadas:
+  //   • soft refresh (30s) → só relê /api/marketplace-orders (rápido);
+  //   • hard sync delta (N min) → chama /sync-delta (pega pedidos novos
+  //     nos marketplaces) e em seguida relê a lista.
+  // Pausa enquanto a aba está oculta (visibilitychange) para não desperdiçar
+  // chamadas nem rate-limit do ML/Shopee em background.
+  useEffect(() => {
+    if (activeTab !== 'marketplace') return;
+    if (mktAutoInterval === 'off') return;
+
+    const hardMinutes = parseInt(mktAutoInterval, 10);
+    const softMs = 30 * 1000;
+    const hardMs = Math.max(1, hardMinutes) * 60 * 1000;
+    let softTimer = null;
+    let hardTimer = null;
+
+    const tickSoft = () => {
+      if (document.hidden) return;
+      if (mktAutoInFlightRef.current) return;
+      fetchMktOrders();
+    };
+    const tickHard = () => {
+      if (document.hidden) return;
+      runAutoSyncDelta();
+    };
+
+    const startTimers = () => {
+      if (softTimer == null) softTimer = setInterval(tickSoft, softMs);
+      if (hardTimer == null) hardTimer = setInterval(tickHard, hardMs);
+    };
+    const stopTimers = () => {
+      if (softTimer != null) { clearInterval(softTimer); softTimer = null; }
+      if (hardTimer != null) { clearInterval(hardTimer); hardTimer = null; }
+    };
+    const handleVisibility = () => {
+      if (document.hidden) stopTimers();
+      else { startTimers(); tickHard(); }
+    };
+
+    startTimers();
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      stopTimers();
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [activeTab, mktAutoInterval, fetchMktOrders, runAutoSyncDelta]);
 
   useEffect(() => {
     if (!mktShowDatePicker) return;
@@ -2744,6 +2854,34 @@ export const Sales = () => {
             className="btn-secondary text-xs h-9 px-3 flex items-center gap-1.5" title="Recarregar lista (sem sincronizar)">
             <RefreshCw className={`w-3.5 h-3.5 ${mktLoading ? 'animate-spin' : ''}`} />
           </button>
+
+          {/* Auto-refresh: dropdown de intervalo + indicador de última sinc +
+              badge de pedidos novos detectados nos últimos ciclos. */}
+          <div className="flex items-center gap-1.5" title="Atualização automática: relê a lista a cada 30s e busca pedidos novos dos marketplaces no intervalo escolhido.">
+            <span className={`w-1.5 h-1.5 rounded-full ${mktAutoInterval === 'off' ? 'bg-gray-300 dark:bg-gray-600' : 'bg-emerald-500 animate-pulse'}`} />
+            <label className="text-[11px] text-gray-500 dark:text-gray-400">Auto:</label>
+            <select
+              value={mktAutoInterval}
+              onChange={e => setMktAutoInterval(e.target.value)}
+              className="input-field text-xs h-9 py-0 px-1.5"
+              title="Off desliga; os demais valores acionam sync-delta periódico"
+            >
+              <option value="off">Off</option>
+              <option value="1">1 min</option>
+              <option value="5">5 min</option>
+              <option value="15">15 min</option>
+            </select>
+            {mktLastAutoSync && (
+              <span className="text-[11px] text-gray-500 dark:text-gray-400 tabular-nums hidden md:inline" title={mktLastAutoSync.toLocaleString('pt-BR')}>
+                {mktLastAutoSync.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+              </span>
+            )}
+            {mktNewOrdersBadge > 0 && (
+              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300 animate-pulse" title="Pedidos novos detectados no último ciclo">
+                +{mktNewOrdersBadge} novo{mktNewOrdersBadge > 1 ? 's' : ''}
+              </span>
+            )}
+          </div>
 
           {blingAccounts.length > 1 && (
             <div className="flex items-center gap-1.5 ml-auto">

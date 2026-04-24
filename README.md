@@ -122,6 +122,19 @@ apoli/
 - Logs do sistema
 - Informações de conectividade
 
+### Sincronização automática de pedidos
+
+O sistema tem quatro crons independentes, configuráveis por env (em minutos, `0` desliga):
+
+| Variável | Default | O que faz |
+|----------|---------|-----------|
+| `ORDERS_AUTO_INTERVAL_MIN` | `5` | Sync leve de **pedidos** ML+Shopee em modo delta (só novos/atualizados desde o último sync) + recálculo de custos em background. Sempre on para toda conta com token válido. |
+| `NFE_AUTO_INTERVAL_MIN` | `10` | Leitura de **NFes** (Faturador ML + Bling + upload na Shopee). Não emite, só lê. |
+| `AUTO_SYNC_INTERVAL_MIN` | `0` | Sync de **catálogo** (itens/anúncios). Opt-in por conta via `auto_sync_enabled`. |
+| `MARKETPLACE_AUTO_INTERVAL_MIN` | `0` | **Emissão** completa de NF Shopee (envia pro Bling e faz upload). Opt-in por conta via `auto_invoice_enabled`. |
+
+Na tela **Pedidos Marketplace** existe também um seletor de auto-refresh (`Off / 1 / 5 / 15 min`) que chama `POST /api/marketplace-orders/sync-delta` e relê a lista sem precisar clicar em "Buscar Pedidos". A preferência fica salva no navegador.
+
 ## 📦 Sistema de Estoque
 
 ### Estrutura dos Dados
